@@ -3,6 +3,11 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from synapse.api.errors import (
+    AuthError,
+    InvalidClientTokenError,
+    MissingClientTokenError,
+)
 from synapse.http import server
 from synapse.http.server import respond_with_json
 from synapse.http.site import SynapseRequest
@@ -85,6 +90,14 @@ class RoomPreview(Resource):
                 send_cors=True,
             )
 
+        except (AuthError, InvalidClientTokenError, MissingClientTokenError) as e:
+            logger.info("Authentication failed for room preview request: %s", e)
+            respond_with_json(
+                request,
+                401,
+                {"error": "Unauthorized", "errcode": "M_UNAUTHORIZED"},
+                send_cors=True,
+            )
         except Exception as e:
             logger.error("Error processing request: %s", e)
             respond_with_json(

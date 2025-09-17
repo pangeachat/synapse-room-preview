@@ -1025,3 +1025,76 @@ class TestE2E(aiounittest.AsyncTestCase):
 
         # Note: Performance benefits are more apparent in production environments
         # where database queries are more complex and network latency is involved
+
+    async def test_room_preview_authentication_error_sqlite(self):
+        """Test 401 error for unauthenticated requests (SQLite)."""
+        await self._test_authentication_error(db="sqlite")
+
+    async def test_room_preview_authentication_error_postgres(self):
+        """Test 401 error for unauthenticated requests (PostgreSQL)."""
+        await self._test_authentication_error(db="postgresql")
+
+    async def _test_authentication_error(self, db: Literal["sqlite", "postgresql"]):
+        """Test that unauthenticated requests return 401 error."""
+        postgres = None
+        postgres_url = None
+        synapse_dir = None
+        server_process = None
+        stdout_thread = None
+        stderr_thread = None
+        try:
+            if db == "postgresql":
+                postgres, postgres_url = await self.start_test_postgres()
+            (
+                synapse_dir,
+                config_path,
+                server_process,
+                stdout_thread,
+                stderr_thread,
+            ) = await self.start_test_synapse(db=db, postgresql_url=postgres_url)
+
+            # Test the room_preview endpoint without authentication
+            room_preview_url = (
+                "http://localhost:8008/_synapse/client/unstable/org.pangea/room_preview"
+            )
+
+            # Test with no authorization header
+            response = requests.get(
+                room_preview_url,
+                params={"rooms": "!test:example.com"},
+                timeout=10,
+            )
+            self.assertEqual(response.status_code, 401)
+            response_data = response.json()
+            self.assertIn("error", response_data)
+            self.assertEqual(response_data["error"], "Unauthorized")
+            self.assertIn("errcode", response_data)
+            self.assertEqual(response_data["errcode"], "M_UNAUTHORIZED")
+
+            # Test with invalid authorization header
+            invalid_headers = {"Authorization": "Bearer invalid_token_12345"}
+            response = requests.get(
+                room_preview_url,
+                headers=invalid_headers,
+                params={"rooms": "!test:example.com"},
+                timeout=10,
+            )
+            self.assertEqual(response.status_code, 401)
+            response_data = response.json()
+            self.assertIn("error", response_data)
+            self.assertEqual(response_data["error"], "Unauthorized")
+            self.assertIn("errcode", response_data)
+            self.assertEqual(response_data["errcode"], "M_UNAUTHORIZED")
+
+        finally:
+            if postgres is not None:
+                postgres.stop()
+            if server_process is not None:
+                server_process.terminate()
+                server_process.wait()
+            if stdout_thread is not None:
+                stdout_thread.join()
+            if stderr_thread is not None:
+                stderr_thread.join()
+            if synapse_dir is not None:
+                shutil.rmtree(synapse_dir)
