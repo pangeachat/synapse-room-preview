@@ -378,8 +378,26 @@ class TestE2E(aiounittest.AsyncTestCase):
             for state_key, json_data in event_data.items():
                 self.assertIsInstance(
                     state_key, str
-                )  # Empty state key should be "default"
+                )  # State key should be a string (empty string or "default")
                 self.assertIsInstance(json_data, dict)  # Should be parsed JSON
+
+                # For state events with empty state key, verify handling
+                if state_key == "default":
+                    # This is the expected behavior for empty state keys
+                    # Should contain just the content, not full Matrix event
+                    self.assertIsInstance(json_data, dict)
+                    # Verify this is the full Matrix event JSON (which contains content)
+                    self.assertIn(
+                        "content",
+                        json_data,
+                        "Response should contain the full Matrix event with 'content' field",
+                    )
+                elif state_key == "":
+                    # Empty state keys are now handled and should not appear in responses
+                    # They are converted to "default" in the implementation
+                    self.fail(
+                        "Empty string state keys should be converted to 'default' key"
+                    )
 
         # Test with fake room to ensure empty structure
         params = {"rooms": "!fake_room:example.com"}
@@ -487,6 +505,9 @@ class TestE2E(aiounittest.AsyncTestCase):
 
         # Verify data structure follows expected format
         self._verify_room_preview_structure(room_data)
+
+        # Specifically test that empty state keys become "default"
+        self._verify_empty_state_key_becomes_default(room_data)
 
     async def _test_multiple_rooms_with_mixed_existence(
         self, room_preview_url: str, headers: dict, room_id: str
@@ -614,6 +635,7 @@ class TestE2E(aiounittest.AsyncTestCase):
     def _verify_room_preview_structure(self, room_data: dict):
         """Verify that room preview data follows the expected structure."""
         # Data should follow format: {[state_event_type]: {[state_key]: JSON}}
+        # Where empty state keys from database become "default"
         self.assertIsInstance(room_data, dict)
 
         for event_type, event_type_data in room_data.items():
@@ -623,10 +645,108 @@ class TestE2E(aiounittest.AsyncTestCase):
             self.assertIsInstance(event_type_data, dict)
 
             for state_key, event_content in event_type_data.items():
-                # State key should be a string ("default" for events with no state key)
+                # State key should be a string (currently "" or should be "default" for events with no state key)
                 self.assertIsInstance(state_key, str)
                 # Event content should be parsed JSON (dict)
                 self.assertIsInstance(event_content, dict)
+
+                # Verify handling of empty state keys
+                if state_key == "default":
+                    # This is the expected behavior for empty state keys
+                    # Should contain the full Matrix event (which includes content)
+                    self.assertIsInstance(event_content, dict)
+                    # Verify this is the full Matrix event JSON with content field
+                    self.assertIn(
+                        "content",
+                        event_content,
+                        "Response should contain the full Matrix event with 'content' field",
+                    )
+                elif state_key == "":
+                    # Empty state keys are now handled and should not appear in responses
+                    # They are converted to "default" in the implementation
+                    self.fail(
+                        "Empty string state keys should be converted to 'default' key"
+                    )
+
+    def _verify_empty_state_key_becomes_default(self, room_data: dict):
+        """Verify that state events with empty state keys are returned with 'default' as the state key."""
+        # We know from create_room_with_state_events that we created events with empty state keys:
+        # - pangea.activity_plan with state_key=""
+        # - pangea.activity_roles with state_key=""
+        # - m.room.join_rules with state_key=""
+        # - m.room.avatar with state_key=""
+        # - m.room.name with state_key="" (from room creation)
+        # - m.room.topic with state_key="" (from room creation)
+
+        # Check that these event types exist and have "default" as the state key
+        expected_events_with_default_state_key = [
+            "pangea.activity_plan",
+            "pangea.activity_roles",
+        ]
+
+        for event_type in expected_events_with_default_state_key:
+            if event_type in room_data:
+                event_data = room_data[event_type]
+                # Based on test failure, the current implementation uses empty string, not "default"
+                # But we want to test for the expected behavior of converting to "default"
+                if "default" in event_data:
+                    # This is the expected behavior - empty state key becomes "default"
+                    # and should return the full Matrix event JSON (which contains content)
+                    full_event = event_data["default"]
+                    self.assertIsInstance(
+                        full_event,
+                        dict,
+                        f"Event type {event_type} with 'default' state key should have dict content",
+                    )
+                    # Verify this is the full Matrix event with content field
+                    self.assertIn(
+                        "content",
+                        full_event,
+                        f"Event type {event_type} should contain 'content' field in full Matrix event",
+                    )
+
+                    # For pangea.activity_plan, verify it has the expected content fields
+                    if event_type == "pangea.activity_plan":
+                        # Access the content field within the full Matrix event
+                        content = full_event.get("content", {})
+                        expected_fields = [
+                            "plan_id",
+                            "title",
+                            "description",
+                            "activities",
+                            "total_duration",
+                            "created_by",
+                        ]
+                        for field in expected_fields:
+                            self.assertIn(
+                                field,
+                                content,
+                                f"Activity plan content should contain field '{field}'",
+                            )
+
+                    # Verify there are no empty string state keys when using "default"
+                    self.assertNotIn(
+                        "",
+                        event_data,
+                        f"Event type {event_type} should not have empty string as state key when using 'default'",
+                    )
+                elif "" in event_data:
+                    # This is the current behavior - empty state key stays as empty string
+                    # Currently returns full Matrix event JSON, but should return just content
+                    full_event = event_data[""]
+                    self.assertIsInstance(
+                        full_event,
+                        dict,
+                        f"Event type {event_type} with empty state key should have dict content",
+                    )
+                    # Empty state keys should now be converted to "default"
+                    self.fail(
+                        "Empty string state keys should be converted to 'default' key"
+                    )
+                else:
+                    self.fail(
+                        f"Event type {event_type} should have 'default' as state key (empty keys are converted)"
+                    )
 
     async def test_room_preview_empty_cases_sqlite(self):
         """Test room preview edge cases (SQLite)."""

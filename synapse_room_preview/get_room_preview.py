@@ -160,16 +160,21 @@ async def get_room_preview(
 
         # Parse the JSON data if it's a string
         if isinstance(json_data, str):
-            event_content = json.loads(json_data)
+            event_data = json.loads(json_data)
         else:
-            event_content = json_data
+            event_data = json_data
+
+        # Return the full Matrix event data (which contains "content" field)
+        # Matrix events have a structure like: {"content": {...}, "type": "...", "state_key": "...", ...}
+        # We return the complete event data
 
         # Store the event data, using state_key as a sub-key if present
         if event_type not in fetched_room_data[room_id]:
             fetched_room_data[room_id][event_type] = {}
 
-        key = state_key if state_key is not None else "default"
-        fetched_room_data[room_id][event_type][key] = event_content
+        # Convert None or empty string state keys to "default"
+        key = state_key if state_key is not None and state_key != "" else "default"
+        fetched_room_data[room_id][event_type][key] = event_data
 
     # Cache each room's data individually and add to result
     for room_id, room_data in fetched_room_data.items():
