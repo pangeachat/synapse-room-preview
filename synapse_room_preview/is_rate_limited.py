@@ -20,11 +20,11 @@ def is_rate_limited(user_id: str, config: SynapseRoomPreviewConfig) -> bool:
     request_log[user_id] = [
         timestamp
         for timestamp in request_log[user_id]
-        if current_time - timestamp <= config.knock_with_code_burst_duration_seconds
+        if current_time - timestamp <= config.burst_duration_seconds
     ]
 
     # Check if the number of requests in the time window exceeds the max limit
-    if len(request_log[user_id]) >= config.knock_with_code_requests_per_burst:
+    if len(request_log[user_id]) >= config.requests_per_burst:
         return True
 
     # If not rate-limited, record the new request timestamp

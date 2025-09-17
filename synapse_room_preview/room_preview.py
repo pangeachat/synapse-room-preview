@@ -10,6 +10,7 @@ from synapse.module_api import ModuleApi
 from twisted.internet import defer
 from twisted.web.resource import Resource
 
+from synapse_room_preview.get_room_preview import get_room_preview
 from synapse_room_preview.is_rate_limited import is_rate_limited
 
 if TYPE_CHECKING:
@@ -73,9 +74,9 @@ class RoomPreview(Resource):
                 )
                 return
 
-            # TODO: Process each room_id and fetch room preview data
-            # For now, return empty dict for each room
-            rooms_data: dict[str, dict] = {room_id: {} for room_id in room_ids}
+            rooms_data = await get_room_preview(
+                room_ids, self._datastores.main, self._config
+            )
 
             respond_with_json(
                 request,

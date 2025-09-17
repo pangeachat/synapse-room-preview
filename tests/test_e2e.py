@@ -49,7 +49,12 @@ class TestE2E(aiounittest.AsyncTestCase):
             config["modules"] = [
                 {
                     "module": "synapse_room_preview.SynapseRoomPreview",
-                    "config": {},
+                    "config": {
+                        "room_preview_state_event_types": [
+                            "pangea.activity_plan",
+                            "pangea.activity_roles",
+                        ]
+                    },
                 }
             ]
             if db == "sqlite":
@@ -241,6 +246,7 @@ class TestE2E(aiounittest.AsyncTestCase):
         await self._test_room_preview(db="postgresql")
 
     async def _test_room_preview(self, db: Literal["sqlite", "postgresql"]):
+        """Setup test environment and run basic room preview tests."""
         postgres = None
         postgres_url = None
         synapse_dir = None
@@ -279,41 +285,13 @@ class TestE2E(aiounittest.AsyncTestCase):
             )
             headers = {"Authorization": f"Bearer {token}"}
 
-            # Test with no rooms parameter (should return empty rooms dict)
-            response = requests.get(
-                room_preview_url,
-                headers=headers,
-                timeout=10,
+            # Run the individual test methods
+            await self._test_basic_room_preview_functionality(
+                room_preview_url, headers, room_id
             )
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json(), {"rooms": {}})
-
-            # Test with single room
-            params = {"rooms": room_id}
-            response = requests.get(
-                room_preview_url,
-                headers=headers,
-                params=params,
-                timeout=10,
+            await self._test_room_preview_data_structure(
+                room_preview_url, headers, room_id
             )
-            self.assertEqual(response.status_code, 200)
-            response_data = response.json()
-            self.assertIn("rooms", response_data)
-            self.assertIn(room_id, response_data["rooms"])
-
-            # Test with multiple rooms (comma-delimited)
-            params = {"rooms": f"{room_id},!fake_room:example.com"}
-            response = requests.get(
-                room_preview_url,
-                headers=headers,
-                params=params,
-                timeout=10,
-            )
-            self.assertEqual(response.status_code, 200)
-            response_data = response.json()
-            self.assertIn("rooms", response_data)
-            self.assertIn(room_id, response_data["rooms"])
-            self.assertIn("!fake_room:example.com", response_data["rooms"])
 
         finally:
             if postgres is not None:
@@ -327,3 +305,432 @@ class TestE2E(aiounittest.AsyncTestCase):
                 stderr_thread.join()
             if synapse_dir is not None:
                 shutil.rmtree(synapse_dir)
+
+    async def _test_basic_room_preview_functionality(
+        self, room_preview_url: str, headers: dict, room_id: str
+    ):
+        """Test basic room preview endpoint functionality."""
+        # Test with no rooms parameter (should return empty rooms dict)
+        response = requests.get(
+            room_preview_url,
+            headers=headers,
+            timeout=10,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"rooms": {}})
+
+        # Test with single room
+        params = {"rooms": room_id}
+        response = requests.get(
+            room_preview_url,
+            headers=headers,
+            params=params,
+            timeout=10,
+        )
+        self.assertEqual(response.status_code, 200)
+        response_data = response.json()
+        self.assertIn("rooms", response_data)
+        self.assertIn(room_id, response_data["rooms"])
+
+        # Test with multiple rooms (comma-delimited)
+        params = {"rooms": f"{room_id},!fake_room:example.com"}
+        response = requests.get(
+            room_preview_url,
+            headers=headers,
+            params=params,
+            timeout=10,
+        )
+        self.assertEqual(response.status_code, 200)
+        response_data = response.json()
+        self.assertIn("rooms", response_data)
+        self.assertIn(room_id, response_data["rooms"])
+        self.assertIn("!fake_room:example.com", response_data["rooms"])
+
+    async def _test_room_preview_data_structure(
+        self, room_preview_url: str, headers: dict, room_id: str
+    ):
+        """Test that the room preview data structure matches expected format."""
+        params = {"rooms": room_id}
+        response = requests.get(
+            room_preview_url,
+            headers=headers,
+            params=params,
+            timeout=10,
+        )
+        self.assertEqual(response.status_code, 200)
+        response_data = response.json()
+
+        # Verify top-level structure
+        self.assertIn("rooms", response_data)
+        self.assertIsInstance(response_data["rooms"], dict)
+
+        # Verify room-level structure
+        self.assertIn(room_id, response_data["rooms"])
+        room_data = response_data["rooms"][room_id]
+        self.assertIsInstance(room_data, dict)
+
+        # The response should follow format: {[room_id]: {[state_event_type]: {[state_key]: JSON}}}
+        for event_type, event_data in room_data.items():
+            self.assertIsInstance(event_type, str)
+            self.assertIsInstance(event_data, dict)
+
+            # Each event type should contain state keys mapped to JSON data
+            for state_key, json_data in event_data.items():
+                self.assertIsInstance(
+                    state_key, str
+                )  # Empty state key should be empty string
+                self.assertIsInstance(json_data, dict)  # Should be parsed JSON
+
+        # Test with fake room to ensure empty structure
+        params = {"rooms": "!fake_room:example.com"}
+        response = requests.get(
+            room_preview_url,
+            headers=headers,
+            params=params,
+            timeout=10,
+        )
+        self.assertEqual(response.status_code, 200)
+        response_data = response.json()
+        self.assertIn("rooms", response_data)
+        self.assertIn("!fake_room:example.com", response_data["rooms"])
+        self.assertEqual(response_data["rooms"]["!fake_room:example.com"], {})
+
+    async def test_room_preview_with_room_state_events_sqlite(self):
+        """Test room preview with actual room state events (SQLite)."""
+        await self._test_room_preview_with_state_events(db="sqlite")
+
+    async def test_room_preview_with_room_state_events_postgres(self):
+        """Test room preview with actual room state events (PostgreSQL)."""
+        await self._test_room_preview_with_state_events(db="postgresql")
+
+    async def _test_room_preview_with_state_events(
+        self, db: Literal["sqlite", "postgresql"]
+    ):
+        """Setup test environment and run room state events tests."""
+        postgres = None
+        postgres_url = None
+        synapse_dir = None
+        server_process = None
+        stdout_thread = None
+        stderr_thread = None
+        try:
+            if db == "postgresql":
+                postgres, postgres_url = await self.start_test_postgres()
+            (
+                synapse_dir,
+                config_path,
+                server_process,
+                stdout_thread,
+                stderr_thread,
+            ) = await self.start_test_synapse(db=db, postgresql_url=postgres_url)
+
+            # Register a user
+            await self.register_user(
+                config_path=config_path,
+                dir=synapse_dir,
+                user="admin_user",
+                password="admin_pw",
+                admin=True,
+            )
+
+            # Login admin user
+            admin_token = await self.login_user("admin_user", "admin_pw")
+
+            # Create a room with specific state events
+            room_id = await self.create_room_with_state_events(admin_token)
+
+            # Test the room_preview endpoint
+            room_preview_url = (
+                "http://localhost:8008/_synapse/client/unstable/org.pangea/room_preview"
+            )
+            headers = {"Authorization": f"Bearer {admin_token}"}
+
+            # Run the individual test methods
+            await self._test_room_with_state_events_functionality(
+                room_preview_url, headers, room_id
+            )
+            await self._test_multiple_rooms_with_mixed_existence(
+                room_preview_url, headers, room_id
+            )
+
+        finally:
+            if postgres is not None:
+                postgres.stop()
+            if server_process is not None:
+                server_process.terminate()
+                server_process.wait()
+            if stdout_thread is not None:
+                stdout_thread.join()
+            if stderr_thread is not None:
+                stderr_thread.join()
+            if synapse_dir is not None:
+                shutil.rmtree(synapse_dir)
+
+    async def _test_room_with_state_events_functionality(
+        self, room_preview_url: str, headers: dict, room_id: str
+    ):
+        """Test room preview for room with state events."""
+        params = {"rooms": room_id}
+        response = requests.get(
+            room_preview_url,
+            headers=headers,
+            params=params,
+            timeout=10,
+        )
+        self.assertEqual(response.status_code, 200)
+        response_data = response.json()
+
+        # Verify the room exists in response
+        self.assertIn("rooms", response_data)
+        self.assertIn(room_id, response_data["rooms"])
+        room_data = response_data["rooms"][room_id]
+
+        # Verify data structure follows expected format
+        self._verify_room_preview_structure(room_data)
+
+    async def _test_multiple_rooms_with_mixed_existence(
+        self, room_preview_url: str, headers: dict, room_id: str
+    ):
+        """Test multiple rooms including non-existent ones."""
+        fake_room = "!nonexistent:example.com"
+        params = {"rooms": f"{room_id},{fake_room}"}
+        response = requests.get(
+            room_preview_url,
+            headers=headers,
+            params=params,
+            timeout=10,
+        )
+        self.assertEqual(response.status_code, 200)
+        response_data = response.json()
+
+        # Both rooms should be in response
+        self.assertIn(room_id, response_data["rooms"])
+        self.assertIn(fake_room, response_data["rooms"])
+
+        # Real room should have data, fake room should be empty
+        self.assertIsInstance(response_data["rooms"][room_id], dict)
+        self.assertEqual(response_data["rooms"][fake_room], {})
+
+    async def create_room_with_state_events(self, access_token: str) -> str:
+        """Create a room with specific state events for testing."""
+        headers = {"Authorization": f"Bearer {access_token}"}
+        create_room_url = "http://localhost:8008/_matrix/client/v3/createRoom"
+
+        # Create room with name, topic, and avatar
+        create_room_data = {
+            "visibility": "private",
+            "preset": "private_chat",
+            "name": "Test Room for Preview",
+            "topic": "This is a test room for room preview functionality",
+            "initial_state": [
+                {
+                    "type": "m.room.join_rules",
+                    "state_key": "",
+                    "content": {"join_rule": "knock"},
+                },
+                {
+                    "type": "m.room.avatar",
+                    "state_key": "",
+                    "content": {"url": "mxc://example.com/test_avatar"},
+                },
+            ],
+        }
+
+        response = requests.post(
+            create_room_url,
+            json=create_room_data,
+            headers=headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        room_id = response.json()["room_id"]
+
+        # Add additional state events
+        state_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/state"
+
+        # Add pangea.activity_plan state event
+        activity_plan_data = {
+            "plan_id": "plan123",
+            "title": "Weekly Team Standup",
+            "description": "Regular team sync meeting to discuss progress and blockers",
+            "activities": [
+                {
+                    "id": "activity1",
+                    "name": "Progress Updates",
+                    "duration": 15,
+                    "type": "discussion",
+                },
+                {
+                    "id": "activity2",
+                    "name": "Blockers Review",
+                    "duration": 10,
+                    "type": "problem_solving",
+                },
+            ],
+            "total_duration": 25,
+            "created_by": "@admin_user:my.domain.name",
+        }
+
+        plan_response = requests.put(
+            f"{state_url}/pangea.activity_plan/",
+            json=activity_plan_data,
+            headers=headers,
+        )
+        self.assertEqual(plan_response.status_code, 200)
+
+        # Add pangea.activity_roles state event
+        activity_roles_data = {
+            "roles": {
+                "@admin_user:my.domain.name": {
+                    "role": "facilitator",
+                    "permissions": ["manage_activities", "assign_roles", "moderate"],
+                },
+                "@user1:my.domain.name": {
+                    "role": "participant",
+                    "permissions": ["participate", "vote"],
+                },
+            },
+            "default_role": "participant",
+            "role_definitions": {
+                "facilitator": {
+                    "description": "Manages the session and activities",
+                    "permissions": ["manage_activities", "assign_roles", "moderate"],
+                },
+                "participant": {
+                    "description": "Active participant in activities",
+                    "permissions": ["participate", "vote"],
+                },
+            },
+        }
+
+        roles_response = requests.put(
+            f"{state_url}/pangea.activity_roles/",
+            json=activity_roles_data,
+            headers=headers,
+        )
+        self.assertEqual(roles_response.status_code, 200)
+
+        return room_id
+
+    def _verify_room_preview_structure(self, room_data: dict):
+        """Verify that room preview data follows the expected structure."""
+        # Data should follow format: {[state_event_type]: {[state_key]: JSON}}
+        self.assertIsInstance(room_data, dict)
+
+        for event_type, event_type_data in room_data.items():
+            # Event type should be a string
+            self.assertIsInstance(event_type, str)
+            # Event type data should be a dict
+            self.assertIsInstance(event_type_data, dict)
+
+            for state_key, event_content in event_type_data.items():
+                # State key should be a string (empty string for events with no state key)
+                self.assertIsInstance(state_key, str)
+                # Event content should be parsed JSON (dict)
+                self.assertIsInstance(event_content, dict)
+
+    async def test_room_preview_empty_cases_sqlite(self):
+        """Test room preview edge cases (SQLite)."""
+        await self._test_room_preview_empty_cases(db="sqlite")
+
+    async def test_room_preview_empty_cases_postgres(self):
+        """Test room preview edge cases (PostgreSQL)."""
+        await self._test_room_preview_empty_cases(db="postgresql")
+
+    async def _test_room_preview_empty_cases(self, db: Literal["sqlite", "postgresql"]):
+        """Setup test environment and run empty/edge case tests."""
+        postgres = None
+        postgres_url = None
+        synapse_dir = None
+        server_process = None
+        stdout_thread = None
+        stderr_thread = None
+        try:
+            if db == "postgresql":
+                postgres, postgres_url = await self.start_test_postgres()
+            (
+                synapse_dir,
+                config_path,
+                server_process,
+                stdout_thread,
+                stderr_thread,
+            ) = await self.start_test_synapse(db=db, postgresql_url=postgres_url)
+
+            # Register a user
+            await self.register_user(
+                config_path=config_path,
+                dir=synapse_dir,
+                user="test_user",
+                password="test_pw",
+                admin=False,
+            )
+
+            # Login user
+            token = await self.login_user("test_user", "test_pw")
+
+            room_preview_url = (
+                "http://localhost:8008/_synapse/client/unstable/org.pangea/room_preview"
+            )
+            headers = {"Authorization": f"Bearer {token}"}
+
+            # Run the individual test methods
+            await self._test_empty_rooms_parameter(room_preview_url, headers)
+            await self._test_whitespace_rooms_parameter(room_preview_url, headers)
+            await self._test_mixed_valid_invalid_room_ids(room_preview_url, headers)
+
+        finally:
+            if postgres is not None:
+                postgres.stop()
+            if server_process is not None:
+                server_process.terminate()
+                server_process.wait()
+            if stdout_thread is not None:
+                stdout_thread.join()
+            if stderr_thread is not None:
+                stderr_thread.join()
+            if synapse_dir is not None:
+                shutil.rmtree(synapse_dir)
+
+    async def _test_empty_rooms_parameter(self, room_preview_url: str, headers: dict):
+        """Test with empty rooms parameter."""
+        response = requests.get(
+            room_preview_url,
+            headers=headers,
+            timeout=10,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"rooms": {}})
+
+    async def _test_whitespace_rooms_parameter(
+        self, room_preview_url: str, headers: dict
+    ):
+        """Test with whitespace-only rooms parameter."""
+        params = {"rooms": "  ,  , "}
+        response = requests.get(
+            room_preview_url,
+            headers=headers,
+            params=params,
+            timeout=10,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"rooms": {}})
+
+    async def _test_mixed_valid_invalid_room_ids(
+        self, room_preview_url: str, headers: dict
+    ):
+        """Test with mix of valid and invalid room IDs."""
+        params = {"rooms": "!valid:example.com,,  ,!another:example.com"}
+        response = requests.get(
+            room_preview_url,
+            headers=headers,
+            params=params,
+            timeout=10,
+        )
+        self.assertEqual(response.status_code, 200)
+        response_data = response.json()
+        self.assertIn("rooms", response_data)
+        # Should have both valid room IDs
+        self.assertIn("!valid:example.com", response_data["rooms"])
+        self.assertIn("!another:example.com", response_data["rooms"])
+        # Both should be empty since they don't exist
+        self.assertEqual(response_data["rooms"]["!valid:example.com"], {})
+        self.assertEqual(response_data["rooms"]["!another:example.com"], {})
