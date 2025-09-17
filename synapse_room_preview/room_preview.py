@@ -44,10 +44,43 @@ class RoomPreview(Resource):
                     send_cors=True,
                 )
                 return
+
+            # Parse rooms parameter from query string
+            rooms_param = request.args.get(b"rooms")
+            if not rooms_param:
+                # No rooms parameter provided, return empty rooms dict
+                respond_with_json(
+                    request,
+                    200,
+                    {"rooms": {}},
+                    send_cors=True,
+                )
+                return
+
+            # Extract room IDs from comma-delimited string
+            rooms_str = rooms_param[0].decode("utf-8")
+            room_ids = [
+                room_id.strip() for room_id in rooms_str.split(",") if room_id.strip()
+            ]
+
+            if not room_ids:
+                # Empty or invalid rooms parameter, return empty rooms dict
+                respond_with_json(
+                    request,
+                    200,
+                    {"rooms": {}},
+                    send_cors=True,
+                )
+                return
+
+            # TODO: Process each room_id and fetch room preview data
+            # For now, return empty dict for each room
+            rooms_data: dict[str, dict] = {room_id: {} for room_id in room_ids}
+
             respond_with_json(
                 request,
                 200,
-                {"rooms": {}},
+                {"rooms": rooms_data},
                 send_cors=True,
             )
 

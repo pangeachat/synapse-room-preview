@@ -278,17 +278,42 @@ class TestE2E(aiounittest.AsyncTestCase):
                 "http://localhost:8008/_synapse/client/unstable/org.pangea/room_preview"
             )
             headers = {"Authorization": f"Bearer {token}"}
-            params = {"room_id": room_id}
 
+            # Test with no rooms parameter (should return empty rooms dict)
+            response = requests.get(
+                room_preview_url,
+                headers=headers,
+                timeout=10,
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), {"rooms": {}})
+
+            # Test with single room
+            params = {"rooms": room_id}
             response = requests.get(
                 room_preview_url,
                 headers=headers,
                 params=params,
                 timeout=10,
             )
-
-            # Expect a 200 response from the room_preview endpoint
             self.assertEqual(response.status_code, 200)
+            response_data = response.json()
+            self.assertIn("rooms", response_data)
+            self.assertIn(room_id, response_data["rooms"])
+
+            # Test with multiple rooms (comma-delimited)
+            params = {"rooms": f"{room_id},!fake_room:example.com"}
+            response = requests.get(
+                room_preview_url,
+                headers=headers,
+                params=params,
+                timeout=10,
+            )
+            self.assertEqual(response.status_code, 200)
+            response_data = response.json()
+            self.assertIn("rooms", response_data)
+            self.assertIn(room_id, response_data["rooms"])
+            self.assertIn("!fake_room:example.com", response_data["rooms"])
 
         finally:
             if postgres is not None:
