@@ -37,6 +37,11 @@ or
 trial tests
 ```
 
+To view test logs for debugging, use:
+```shell
+tail -f synapse.log
+```
+
 To run the linters and `mypy` type checker, use `./scripts-dev/lint.sh`.
 
 
