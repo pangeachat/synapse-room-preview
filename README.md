@@ -2,6 +2,90 @@
 
 This module allow authenticated users to read content of pre-configured state events of a room without being a member of said room.
 
+## Endpoint Behavior
+
+The module exposes a REST endpoint at `/_synapse/client/unstable/org.pangea/room_preview` that allows authenticated users to retrieve specific state events from Matrix rooms without being a member of those rooms.
+
+### Endpoint Details
+
+- **URL:** `/_synapse/client/unstable/org.pangea/room_preview`
+- **Method:** GET
+- **Authentication:** Required (valid Matrix access token)
+- **Rate Limiting:** Configurable burst limit (default: 10 requests per 60 seconds per user)
+
+### Query Parameters
+
+- `rooms` (optional): Comma-delimited list of room IDs to fetch preview data for
+  - Example: `?rooms=!room1:example.com,!room2:example.com`
+  - If omitted, returns empty rooms object
+
+### Response Format
+
+```json
+{
+  "rooms": {
+    "!room_id:example.com": {
+      "event_type": {
+        "state_key": {
+          // Full event JSON content
+        }
+      }
+    }
+  }
+}
+```
+
+### Response Structure
+
+- **Success (200):** Returns room preview data in the format above
+- **Rate Limited (429):** `{"error": "Rate limited"}` when user exceeds configured limits
+- **Server Error (500):** `{"error": "Internal server error"}` for unexpected errors
+- **Empty Response:** Returns `{"rooms": {}}` when no rooms parameter provided or no matching rooms found
+
+### Caching
+
+The module implements an in-memory cache with a 1-minute TTL to improve performance on repeated requests for the same room data.
+
+### Usage Examples
+
+#### Get preview data for a single room
+```bash
+curl -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+     "https://matrix.example.com/_synapse/client/unstable/org.pangea/room_preview?rooms=!room_id:example.com"
+```
+
+#### Get preview data for multiple rooms
+```bash
+curl -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+     "https://matrix.example.com/_synapse/client/unstable/org.pangea/room_preview?rooms=!room1:example.com,!room2:example.com"
+```
+
+#### Example response
+```json
+{
+  "rooms": {
+    "!room1:example.com": {
+      "m.room.name": {
+        "default": {
+          "name": "Public Discussion Room"
+        }
+      },
+      "p.room_summary": {
+        "default": {
+          "summary": "A place for general discussions",
+          "participant_count": 42
+        }
+      }
+    },
+    "!room2:example.com": {}
+  }
+}
+```
+
+### Configuration
+
+The endpoint behavior is controlled by the module configuration (see Installation section below).
+
 
 ## Installation
 
@@ -17,8 +101,26 @@ Then alter your homeserver configuration, adding to your `modules` configuration
 modules:
   - module: synapse_room_preview.SynapseRoomPreview
     config:
-      # TODO: Complete this section with an example for your module
+      # List of state event types that can be read through the preview endpoint
+      room_preview_state_event_types:
+        - "p.room_summary"        # Default state event type
+        - "pangea.activity_plan"  # Custom event types
+        - "pangea.activity_roles"
+        - "m.room.name"          # Standard Matrix room name
+        - "m.room.topic"         # Standard Matrix room topic
+      
+      # Rate limiting configuration (optional)
+      burst_duration_seconds: 60    # Time window for rate limiting (default: 60)
+      requests_per_burst: 10        # Max requests per time window (default: 10)
 ```
+
+### Configuration Options
+
+- **`room_preview_state_event_types`** (required): List of Matrix state event types that users can read through the preview endpoint. Only these event types will be returned in responses.
+
+- **`burst_duration_seconds`** (optional, default: 60): The time window in seconds for rate limiting. Users can make up to `requests_per_burst` requests within this time window.
+
+- **`requests_per_burst`** (optional, default: 10): Maximum number of requests a user can make within the `burst_duration_seconds` time window.
 
 
 ## Development

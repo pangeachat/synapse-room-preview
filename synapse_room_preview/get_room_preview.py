@@ -65,8 +65,7 @@ async def get_room_preview(
         }
     }
 
-    Note: Empty matrix state key will mean that the state event is queried
-    with empty string state key.
+    Note: Empty matrix state key will be represented as "default" in the response.
 
     :param rooms: List of room IDs to get preview data for.
     :param room_store: The RoomStore instance to query the database.
@@ -169,7 +168,7 @@ async def get_room_preview(
         if event_type not in fetched_room_data[room_id]:
             fetched_room_data[room_id][event_type] = {}
 
-        key = state_key if state_key is not None else ""
+        key = state_key if state_key is not None else "default"
         fetched_room_data[room_id][event_type][key] = event_content
 
     # Cache each room's data individually and add to result

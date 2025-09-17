@@ -378,7 +378,7 @@ class TestE2E(aiounittest.AsyncTestCase):
             for state_key, json_data in event_data.items():
                 self.assertIsInstance(
                     state_key, str
-                )  # Empty state key should be empty string
+                )  # Empty state key should be "default"
                 self.assertIsInstance(json_data, dict)  # Should be parsed JSON
 
         # Test with fake room to ensure empty structure
@@ -623,7 +623,7 @@ class TestE2E(aiounittest.AsyncTestCase):
             self.assertIsInstance(event_type_data, dict)
 
             for state_key, event_content in event_type_data.items():
-                # State key should be a string (empty string for events with no state key)
+                # State key should be a string ("default" for events with no state key)
                 self.assertIsInstance(state_key, str)
                 # Event content should be parsed JSON (dict)
                 self.assertIsInstance(event_content, dict)
