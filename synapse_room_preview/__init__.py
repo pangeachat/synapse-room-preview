@@ -1,8 +1,10 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import attr
+from synapse.events import EventBase
 from synapse.module_api import ModuleApi
 
+from synapse_room_preview.get_room_preview import invalidate_room_cache
 from synapse_room_preview.room_preview import RoomPreview
 
 
@@ -11,6 +13,14 @@ class SynapseRoomPreviewConfig:
     room_preview_state_event_types: List[str]
     burst_duration_seconds: int = 60
     requests_per_burst: int = 10
+
+    _set_room_preview_state_event_types: Optional[set[str]] = None
+
+    @property
+    def set_room_preview_state_event_types(self) -> set[str]:
+        if self._set_room_preview_state_event_types is not None:
+            return self._set_room_preview_state_event_types
+        return set(self.room_preview_state_event_types)
 
 
 class SynapseRoomPreview:
@@ -27,6 +37,36 @@ class SynapseRoomPreview:
             path="/_synapse/client/unstable/org.pangea/room_preview",
             resource=self.room_preview_resource,
         )
+
+        # Register reactive cache invalidation callback
+        self._api.register_third_party_rules_callbacks(
+            on_new_event=self._on_new_event,
+        )
+
+    async def _on_new_event(
+        self,
+        event: EventBase,
+        _: Mapping[Tuple[str, str], EventBase],
+    ) -> None:
+        """
+        Handle new events to reactively invalidate cache when relevant state events change.
+
+        This callback is triggered for every new event in the homeserver.
+        We only care about state events that match our configured preview types.
+        """
+        # Only process state events
+        if not event.is_state():
+            return
+
+        # Only process events for types we care about
+        if event.type not in self._config.set_room_preview_state_event_types:
+            return
+
+        room_id = event.room_id
+
+        # Invalidate the entire cache for this room to force a fresh fetch
+        # This is simpler and more reliable than trying to update specific data
+        invalidate_room_cache(room_id)
 
     @staticmethod
     def parse_config(config: Dict[str, Any]) -> SynapseRoomPreviewConfig:

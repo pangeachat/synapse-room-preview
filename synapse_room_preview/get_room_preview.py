@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 # In-memory cache for room preview data
 # Structure: {room_id: (data, timestamp)}
 _room_cache: Dict[str, Tuple[Dict[str, Dict[str, Any]], float]] = {}
-_CACHE_TTL_SECONDS = 60  # 1 minute TTL
+_CACHE_TTL_SECONDS = 300  # 5 minutes TTL (increased due to reactive invalidation)
 
 
 def _is_cache_valid(timestamp: float) -> bool:
@@ -47,14 +47,26 @@ def _cleanup_expired_cache() -> None:
         del _room_cache[room_id]
 
 
+def invalidate_room_cache(room_id: str) -> None:
+    """
+    Invalidate cached data for a specific room.
+
+    This function is called reactively when state events change in a room.
+
+    :param room_id: The room ID to invalidate from cache
+    """
+    _room_cache.pop(room_id, None)
+
+
 async def get_room_preview(
     rooms: List[str], room_store: RoomStore, config: "SynapseRoomPreviewConfig"
 ) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """
     Get room preview data including state events for the specified rooms.
 
-    Uses an in-memory cache with 1-minute TTL for individual room data to improve
-    performance on repeated requests.
+    Uses an in-memory cache with 5-minute TTL for individual room data to improve
+    performance on repeated requests. The cache is reactively invalidated when
+    relevant state events change.
 
     Returns a dictionary with the structure:
     {
