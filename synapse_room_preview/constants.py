@@ -19,3 +19,8 @@ DEFAULT_INVITE_POWER_LEVEL = 0  # existing power level value
 USERS_DEFAULT_POWER_LEVEL_KEY = "users_default"  # existing power level key
 DEFAULT_USERS_DEFAULT_POWER_LEVEL = 0  # existing power level value
 USERS_POWER_LEVEL_KEY = "users"  # existing power level key
+
+# DEFAULT STATE EVENT TO RETURN
+PANGEA_COURSE_PLAN_STATE_EVENT_TYPE = "pangea.course_plan"
+PANGEA_ACTIVITY_PLAN_STATE_EVENT_TYPE = "pangea.activity_plan"
+PANGEA_ACTIVITY_ROLE_STATE_EVENT_TYPE = "pangea.activity_roles"

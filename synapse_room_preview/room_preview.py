@@ -80,7 +80,7 @@ class RoomPreview(Resource):
                 return
 
             rooms_data = await get_room_preview(
-                room_ids, self._datastores.main, self._config
+                room_ids, self._api, self._datastores.main, self._config
             )
 
             respond_with_json(

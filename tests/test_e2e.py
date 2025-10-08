@@ -1098,3 +1098,306 @@ class TestE2E(aiounittest.AsyncTestCase):
                 stderr_thread.join()
             if synapse_dir is not None:
                 shutil.rmtree(synapse_dir)
+
+    async def test_activity_roles_filtering_sqlite(self):
+        await self._test_activity_roles_filtering(db="sqlite")
+
+    async def test_activity_roles_filtering_postgres(self):
+        await self._test_activity_roles_filtering(db="postgresql")
+
+    async def _test_activity_roles_filtering(self, db: Literal["sqlite", "postgresql"]):
+        """Test that activity roles are filtered to only include current room members."""
+        postgres = None
+        postgres_url = None
+        synapse_dir = None
+        server_process = None
+        stdout_thread = None
+        stderr_thread = None
+        try:
+            if db == "postgresql":
+                postgres, postgres_url = await self.start_test_postgres()
+            (
+                synapse_dir,
+                config_path,
+                server_process,
+                stdout_thread,
+                stderr_thread,
+            ) = await self.start_test_synapse(db=db, postgresql_url=postgres_url)
+
+            # Register admin user
+            await self.register_user(
+                config_path=config_path,
+                dir=synapse_dir,
+                user="admin_user",
+                password="admin_pw",
+                admin=True,
+            )
+
+            # Register two test users
+            await self.register_user(
+                config_path=config_path,
+                dir=synapse_dir,
+                user="user1",
+                password="pw1",
+                admin=False,
+            )
+
+            await self.register_user(
+                config_path=config_path,
+                dir=synapse_dir,
+                user="user2",
+                password="pw2",
+                admin=False,
+            )
+
+            # Login users
+            admin_token = await self.login_user("admin_user", "admin_pw")
+            user1_token = await self.login_user("user1", "pw1")
+            user2_token = await self.login_user("user2", "pw2")
+
+            # Create a room with activity roles
+            room_id = await self.create_room_with_activity_roles(
+                admin_token, user1_token, user2_token
+            )
+
+            # Initially both users should be in the activity roles
+            room_preview_url = (
+                "http://localhost:8008/_synapse/client/unstable/org.pangea/room_preview"
+            )
+            headers = {"Authorization": f"Bearer {admin_token}"}
+
+            response = requests.get(
+                room_preview_url,
+                params={"rooms": room_id},
+                headers=headers,
+                timeout=10,
+            )
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+
+            # Verify both users are in activity roles initially
+            self.assertIn("rooms", data)
+            self.assertIn(room_id, data["rooms"])
+            room_data = data["rooms"][room_id]
+            self.assertIn("pangea.activity_roles", room_data)
+
+            activity_roles = room_data["pangea.activity_roles"]["default"]["content"][
+                "roles"
+            ]
+            self.assertEqual(len(activity_roles), 3)  # admin + user1 + user2
+
+            # Verify all users are present
+            user_ids_in_roles = {role["user_id"] for role in activity_roles.values()}
+            expected_users = {
+                "@admin_user:my.domain.name",
+                "@user1:my.domain.name",
+                "@user2:my.domain.name",
+            }
+            self.assertEqual(user_ids_in_roles, expected_users)
+
+            # Remove user2 from the room (kick them)
+            kick_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/kick"
+            kick_data = {
+                "user_id": "@user2:my.domain.name",
+                "reason": "Test kick for filtering",
+            }
+            kick_response = requests.post(
+                kick_url,
+                json=kick_data,
+                headers=headers,
+            )
+            self.assertEqual(kick_response.status_code, 200)
+
+            # Wait a moment for the kick to be processed
+            await asyncio.sleep(0.5)
+
+            # Request room preview again - user2's role should be filtered out
+            response = requests.get(
+                room_preview_url,
+                params={"rooms": room_id},
+                headers=headers,
+                timeout=10,
+            )
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+
+            # Verify user2's role is filtered out
+            room_data = data["rooms"][room_id]
+            activity_roles = room_data["pangea.activity_roles"]["default"]["content"][
+                "roles"
+            ]
+
+            # Should only have admin and user1 now (user2 should be filtered out)
+            self.assertEqual(len(activity_roles), 2)
+
+            user_ids_in_roles = {role["user_id"] for role in activity_roles.values()}
+            expected_users = {"@admin_user:my.domain.name", "@user1:my.domain.name"}
+            self.assertEqual(user_ids_in_roles, expected_users)
+
+            # Verify user2 is NOT in the roles
+            self.assertNotIn("@user2:my.domain.name", user_ids_in_roles)
+
+        finally:
+            if postgres is not None:
+                postgres.stop()
+            if server_process is not None:
+                server_process.terminate()
+                server_process.wait()
+            if stdout_thread is not None:
+                stdout_thread.join()
+            if stderr_thread is not None:
+                stderr_thread.join()
+            if synapse_dir is not None:
+                shutil.rmtree(synapse_dir)
+
+    async def create_room_with_activity_roles(
+        self, admin_token: str, user1_token: str, user2_token: str
+    ) -> str:
+        """Create a room with both users invited and add activity roles for all."""
+        headers = {"Authorization": f"Bearer {admin_token}"}
+        create_room_url = "http://localhost:8008/_matrix/client/v3/createRoom"
+
+        # Create room
+        create_room_data = {
+            "visibility": "private",
+            "preset": "private_chat",
+            "name": "Test Room for Activity Roles Filtering",
+            "invite": ["@user1:my.domain.name", "@user2:my.domain.name"],
+        }
+
+        response = requests.post(
+            create_room_url,
+            json=create_room_data,
+            headers=headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        room_id = response.json()["room_id"]
+
+        # Accept invitations for both users
+        join_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/join"
+
+        user1_headers = {"Authorization": f"Bearer {user1_token}"}
+        join_response1 = requests.post(join_url, headers=user1_headers)
+        self.assertEqual(join_response1.status_code, 200)
+
+        user2_headers = {"Authorization": f"Bearer {user2_token}"}
+        join_response2 = requests.post(join_url, headers=user2_headers)
+        self.assertEqual(join_response2.status_code, 200)
+
+        # Add activity roles state event with all three users
+        state_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/state"
+        activity_roles_data = {
+            "roles": {
+                "role-admin-123": {
+                    "archived_at": None,
+                    "finished_at": None,
+                    "id": "role-admin-123",
+                    "role": "facilitator",
+                    "user_id": "@admin_user:my.domain.name",
+                },
+                "role-user1-456": {
+                    "archived_at": None,
+                    "finished_at": None,
+                    "id": "role-user1-456",
+                    "role": "participant",
+                    "user_id": "@user1:my.domain.name",
+                },
+                "role-user2-789": {
+                    "archived_at": None,
+                    "finished_at": None,
+                    "id": "role-user2-789",
+                    "role": "observer",
+                    "user_id": "@user2:my.domain.name",
+                },
+            }
+        }
+
+        roles_response = requests.put(
+            f"{state_url}/pangea.activity_roles/",
+            json=activity_roles_data,
+            headers=headers,
+        )
+        self.assertEqual(roles_response.status_code, 200)
+
+        return room_id
+
+    async def test_activity_roles_filtering_no_roles_sqlite(self):
+        await self._test_activity_roles_filtering_no_roles(db="sqlite")
+
+    async def test_activity_roles_filtering_no_roles_postgres(self):
+        await self._test_activity_roles_filtering_no_roles(db="postgresql")
+
+    async def _test_activity_roles_filtering_no_roles(
+        self, db: Literal["sqlite", "postgresql"]
+    ):
+        """Test that room preview works correctly when there are no activity roles."""
+        postgres = None
+        postgres_url = None
+        synapse_dir = None
+        server_process = None
+        stdout_thread = None
+        stderr_thread = None
+        try:
+            if db == "postgresql":
+                postgres, postgres_url = await self.start_test_postgres()
+            (
+                synapse_dir,
+                config_path,
+                server_process,
+                stdout_thread,
+                stderr_thread,
+            ) = await self.start_test_synapse(db=db, postgresql_url=postgres_url)
+
+            # Register admin user
+            await self.register_user(
+                config_path=config_path,
+                dir=synapse_dir,
+                user="admin_user",
+                password="admin_pw",
+                admin=True,
+            )
+
+            admin_token = await self.login_user("admin_user", "admin_pw")
+
+            # Create a room without activity roles
+            room_id = await self.create_private_room_knock_allowed_room(admin_token)
+
+            # Request room preview - should work fine without activity roles
+            room_preview_url = (
+                "http://localhost:8008/_synapse/client/unstable/org.pangea/room_preview"
+            )
+            headers = {"Authorization": f"Bearer {admin_token}"}
+
+            response = requests.get(
+                room_preview_url,
+                params={"rooms": room_id},
+                headers=headers,
+                timeout=10,
+            )
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+
+            # Should have room data but no activity roles
+            self.assertIn("rooms", data)
+            self.assertIn(room_id, data["rooms"])
+            room_data = data["rooms"][room_id]
+
+            # Activity roles should not be present (since we didn't create any)
+            # But the request should still succeed
+            if "pangea.activity_roles" in room_data:
+                # If present, should be empty or properly structured
+                activity_roles_data = room_data["pangea.activity_roles"]
+                self.assertIsInstance(activity_roles_data, dict)
+
+        finally:
+            if postgres is not None:
+                postgres.stop()
+            if server_process is not None:
+                server_process.terminate()
+                server_process.wait()
+            if stdout_thread is not None:
+                stdout_thread.join()
+            if stderr_thread is not None:
+                stderr_thread.join()
+            if synapse_dir is not None:
+                shutil.rmtree(synapse_dir)

@@ -1,11 +1,22 @@
 import json
+import logging
 import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+from synapse.module_api import ModuleApi
 from synapse.storage.databases.main.room import RoomStore
+
+from synapse_room_preview.constants import (
+    EVENT_TYPE_M_ROOM_MEMBER,
+    MEMBERSHIP_CONTENT_KEY,
+    MEMBERSHIP_JOIN,
+    PANGEA_ACTIVITY_ROLE_STATE_EVENT_TYPE,
+)
 
 if TYPE_CHECKING:
     from synapse_room_preview import SynapseRoomPreviewConfig
+
+logger = logging.getLogger("synapse.module.synapse_room_preview.get_room_preview")
 
 # In-memory cache for room preview data
 # Structure: {room_id: (data, timestamp)}
@@ -58,8 +69,89 @@ def invalidate_room_cache(room_id: str) -> None:
     _room_cache.pop(room_id, None)
 
 
+async def _get_room_members(
+    room_id: str, api: ModuleApi, room_store: RoomStore
+) -> set[str]:
+    """
+    Get the set of user IDs who are currently joined members of the room.
+
+    :param room_id: The room ID to get members for
+    :param api: The ModuleApi instance to query room state
+    :param room_store: The RoomStore instance (kept for compatibility, not used)
+    :return: Set of user IDs who are currently joined members
+    """
+    joined_members = set()
+
+    try:
+        # Get all membership events for the room
+        membership_events = await api.get_room_state(room_id)
+
+        # Filter for joined members
+        for (event_type, state_key), event in membership_events.items():
+            if event_type == EVENT_TYPE_M_ROOM_MEMBER:
+                if hasattr(event, "content") and event.content:
+                    membership = event.content.get(MEMBERSHIP_CONTENT_KEY)
+                    if membership == MEMBERSHIP_JOIN:
+                        joined_members.add(state_key)
+                elif isinstance(event, dict):
+                    # Handle case where event is a dict
+                    content = event.get("content", {})
+                    membership = content.get(MEMBERSHIP_CONTENT_KEY)
+                    if membership == MEMBERSHIP_JOIN:
+                        joined_members.add(state_key)
+
+    except Exception as e:
+        # Log the error but still return empty set to ensure robustness
+        logger.error(
+            "Failed to get room members for room %s: %s", room_id, e, exc_info=True
+        )
+
+    return joined_members
+
+
+def _filter_activity_roles(
+    room_data: Dict[str, Dict[str, Any]], room_members: set[str]
+) -> None:
+    """
+    Filter out activity roles for users who are no longer members of the room.
+
+    :param room_data: The room data dictionary to modify in-place
+    :param room_members: Set of user IDs who are currently joined members
+    """
+    if PANGEA_ACTIVITY_ROLE_STATE_EVENT_TYPE not in room_data:
+        return
+
+    activity_roles = room_data[PANGEA_ACTIVITY_ROLE_STATE_EVENT_TYPE]
+
+    for event_data in activity_roles.values():
+        if not isinstance(event_data, dict):
+            continue
+
+        content = event_data.get("content", {})
+        if not isinstance(content, dict):
+            continue
+
+        roles = content.get("roles", {})
+        if not isinstance(roles, dict):
+            continue
+
+        # Filter out roles for users not in room_members
+        filtered_roles = {}
+        for role_id, role_data in roles.items():
+            if isinstance(role_data, dict):
+                user_id = role_data.get("user_id")
+                if user_id and user_id in room_members:
+                    filtered_roles[role_id] = role_data
+
+        # Update the content with filtered roles
+        content["roles"] = filtered_roles
+
+
 async def get_room_preview(
-    rooms: List[str], room_store: RoomStore, config: "SynapseRoomPreviewConfig"
+    rooms: List[str],
+    api: ModuleApi,
+    room_store: RoomStore,
+    config: "SynapseRoomPreviewConfig",
 ) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """
     Get room preview data including state events for the specified rooms.
@@ -98,6 +190,10 @@ async def get_room_preview(
     for room_id in rooms:
         cached_data = _get_cached_room(room_id)
         if cached_data is not None:
+            # Apply activity role filtering to cached data as well
+            # in case membership has changed since caching
+            room_members = await _get_room_members(room_id, api, room_store)
+            _filter_activity_roles(cached_data, room_members)
             result[room_id] = cached_data
         else:
             rooms_to_fetch.append(room_id)
@@ -190,6 +286,12 @@ async def get_room_preview(
 
     # Cache each room's data individually and add to result
     for room_id, room_data in fetched_room_data.items():
+        # Get current room members for filtering activity roles
+        room_members = await _get_room_members(room_id, api, room_store)
+
+        # Filter activity roles to only include roles for current members
+        _filter_activity_roles(room_data, room_members)
+
         _cache_room_data(room_id, room_data)
         result[room_id] = room_data
 

@@ -4,6 +4,11 @@ import attr
 from synapse.events import EventBase
 from synapse.module_api import ModuleApi
 
+from synapse_room_preview.constants import (
+    PANGEA_ACTIVITY_PLAN_STATE_EVENT_TYPE,
+    PANGEA_ACTIVITY_ROLE_STATE_EVENT_TYPE,
+    PANGEA_COURSE_PLAN_STATE_EVENT_TYPE,
+)
 from synapse_room_preview.get_room_preview import invalidate_room_cache
 from synapse_room_preview.room_preview import RoomPreview
 
@@ -81,12 +86,22 @@ class SynapseRoomPreview:
         if not isinstance(room_preview_state_event_types, list):
             room_preview_state_event_types = ["p.room_summary"]
 
+        # Always include PANGEA state event types
+        pangea_types = [
+            PANGEA_COURSE_PLAN_STATE_EVENT_TYPE,
+            PANGEA_ACTIVITY_PLAN_STATE_EVENT_TYPE,
+            PANGEA_ACTIVITY_ROLE_STATE_EVENT_TYPE,
+        ]
+
+        # Combine and deduplicate
+        all_event_types = list(set(room_preview_state_event_types + pangea_types))
+
         # Parse other configuration options with defaults
         burst_duration_seconds = config.get("burst_duration_seconds", 60)
         requests_per_burst = config.get("requests_per_burst", 10)
 
         return SynapseRoomPreviewConfig(
-            room_preview_state_event_types=room_preview_state_event_types,
+            room_preview_state_event_types=all_event_types,
             burst_duration_seconds=burst_duration_seconds,
             requests_per_burst=requests_per_burst,
         )
