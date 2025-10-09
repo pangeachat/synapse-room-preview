@@ -56,6 +56,7 @@ def _cleanup_expired_cache() -> None:
     ]
     for room_id in expired_keys:
         del _room_cache[room_id]
+    logger.info("Expired %s entries from room preview cache, %s left", len(expired_keys), len(_room_cache))
 
 
 def invalidate_room_cache(room_id: str) -> None:
@@ -202,6 +203,8 @@ async def get_room_preview(
     if not rooms_to_fetch:
         return result
 
+    logger.info("Fetching %s rooms", len(rooms_to_fetch))
+
     # Fetch uncached rooms from database
     # Check which database backend we are using
     database_engine = room_store.db_pool.engine.module.__name__
@@ -294,5 +297,7 @@ async def get_room_preview(
 
         _cache_room_data(room_id, room_data)
         result[room_id] = room_data
+
+    logger.info("Number of cached entries: %s", len(_room_cache))
 
     return result
