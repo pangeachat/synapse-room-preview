@@ -9,7 +9,6 @@ from synapse.storage.databases.main.room import RoomStore
 from synapse_room_preview.constants import (
     EVENT_TYPE_M_ROOM_MEMBER,
     MEMBERSHIP_CONTENT_KEY,
-    MEMBERSHIP_JOIN,
     PANGEA_ACTIVITY_ROLE_STATE_EVENT_TYPE,
 )
 
@@ -69,60 +68,69 @@ def invalidate_room_cache(room_id: str) -> None:
     _room_cache.pop(room_id, None)
 
 
-async def _get_room_members(
+async def _get_membership_summary(
     room_id: str, api: ModuleApi, room_store: RoomStore
-) -> set[str]:
+) -> Dict[str, str]:
     """
-    Get the set of user IDs who are currently joined members of the room.
+    Get a summary of user memberships in the room.
 
-    :param room_id: The room ID to get members for
+    :param room_id: The room ID to get membership summary for
     :param api: The ModuleApi instance to query room state
     :param room_store: The RoomStore instance (kept for compatibility, not used)
-    :return: Set of user IDs who are currently joined members
+    :return: Dictionary mapping user_id to membership status (e.g., "join", "leave")
     """
-    joined_members = set()
+    membership_summary: Dict[str, str] = {}
 
     try:
         # Get all membership events for the room
         membership_events = await api.get_room_state(room_id)
 
-        # Filter for joined members
+        # Build membership summary
         for (event_type, state_key), event in membership_events.items():
             if event_type == EVENT_TYPE_M_ROOM_MEMBER:
                 if hasattr(event, "content") and event.content:
                     membership = event.content.get(MEMBERSHIP_CONTENT_KEY)
-                    if membership == MEMBERSHIP_JOIN:
-                        joined_members.add(state_key)
+                    if membership:
+                        membership_summary[state_key] = membership
                 elif isinstance(event, dict):
                     # Handle case where event is a dict
                     content = event.get("content", {})
                     membership = content.get(MEMBERSHIP_CONTENT_KEY)
-                    if membership == MEMBERSHIP_JOIN:
-                        joined_members.add(state_key)
+                    if membership:
+                        membership_summary[state_key] = membership
 
     except Exception as e:
-        # Log the error but still return empty set to ensure robustness
+        # Log the error but still return empty dict to ensure robustness
         logger.error(
-            "Failed to get room members for room %s: %s", room_id, e, exc_info=True
+            "Failed to get membership summary for room %s: %s",
+            room_id,
+            e,
+            exc_info=True,
         )
 
-    return joined_members
+    return membership_summary
 
 
-def _filter_activity_roles(
-    room_data: Dict[str, Dict[str, Any]], room_members: set[str]
+def _add_membership_summary(
+    room_data: Dict[str, Dict[str, Any]], membership_summary: Dict[str, str]
 ) -> None:
     """
-    Filter out activity roles for users who are no longer members of the room.
+    Add membership summary for users in activity roles state event to room data.
+
+    The membership summary only includes users who are referenced in the activity
+    roles state event. This allows clients to determine who has left the room
+    while still seeing all roles (including those of users who have left).
 
     :param room_data: The room data dictionary to modify in-place
-    :param room_members: Set of user IDs who are currently joined members
+    :param membership_summary: Dictionary mapping user_id to membership status
     """
     if PANGEA_ACTIVITY_ROLE_STATE_EVENT_TYPE not in room_data:
         return
 
     activity_roles = room_data[PANGEA_ACTIVITY_ROLE_STATE_EVENT_TYPE]
 
+    # Collect all user IDs from the activity roles
+    user_ids_in_roles: set[str] = set()
     for event_data in activity_roles.values():
         if not isinstance(event_data, dict):
             continue
@@ -135,16 +143,21 @@ def _filter_activity_roles(
         if not isinstance(roles, dict):
             continue
 
-        # Filter out roles for users not in room_members
-        filtered_roles = {}
-        for role_id, role_data in roles.items():
+        for role_data in roles.values():
             if isinstance(role_data, dict):
                 user_id = role_data.get("user_id")
-                if user_id and user_id in room_members:
-                    filtered_roles[role_id] = role_data
+                if user_id:
+                    user_ids_in_roles.add(user_id)
 
-        # Update the content with filtered roles
-        content["roles"] = filtered_roles
+    # Create filtered membership summary with only users in activity roles
+    filtered_summary = {
+        user_id: membership
+        for user_id, membership in membership_summary.items()
+        if user_id in user_ids_in_roles
+    }
+
+    # Add the membership summary to room_data at the top level
+    room_data["membership_summary"] = filtered_summary
 
 
 async def get_room_preview(
@@ -165,17 +178,23 @@ async def get_room_preview(
         [room_id]: {
             [state_event_type]: {
                 [state_key]: JSON
+            },
+            "membership_summary": {
+                [user_id]: [membership_status]
             }
         }
     }
 
     Note: Empty matrix state key will be represented as "default" in the response.
+    Note: The membership_summary only includes users who are referenced in the
+          activity roles state event, allowing clients to determine who has left
+          the room while still seeing all roles.
 
     :param rooms: List of room IDs to get preview data for.
     :param room_store: The RoomStore instance to query the database.
     :param config: The configuration containing state event types to query.
     :return: A dictionary mapping room_id to state event data organized by
-             event type and state key.
+             event type and state key, plus a membership_summary for activity roles.
     """
     if not rooms or not config.room_preview_state_event_types:
         return {}
@@ -190,10 +209,10 @@ async def get_room_preview(
     for room_id in rooms:
         cached_data = _get_cached_room(room_id)
         if cached_data is not None:
-            # Apply activity role filtering to cached data as well
+            # Get current membership summary and add to cached data
             # in case membership has changed since caching
-            room_members = await _get_room_members(room_id, api, room_store)
-            _filter_activity_roles(cached_data, room_members)
+            membership_summary = await _get_membership_summary(room_id, api, room_store)
+            _add_membership_summary(cached_data, membership_summary)
             result[room_id] = cached_data
         else:
             rooms_to_fetch.append(room_id)
@@ -286,11 +305,11 @@ async def get_room_preview(
 
     # Cache each room's data individually and add to result
     for room_id, room_data in fetched_room_data.items():
-        # Get current room members for filtering activity roles
-        room_members = await _get_room_members(room_id, api, room_store)
+        # Get current membership summary and add to room data
+        membership_summary = await _get_membership_summary(room_id, api, room_store)
 
-        # Filter activity roles to only include roles for current members
-        _filter_activity_roles(room_data, room_members)
+        # Add membership summary for users in activity roles
+        _add_membership_summary(room_data, membership_summary)
 
         _cache_room_data(room_id, room_data)
         result[room_id] = room_data

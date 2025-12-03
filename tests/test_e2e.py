@@ -1100,13 +1100,15 @@ class TestE2E(aiounittest.AsyncTestCase):
                 shutil.rmtree(synapse_dir)
 
     async def test_activity_roles_filtering_sqlite(self):
-        await self._test_activity_roles_filtering(db="sqlite")
+        await self._test_activity_roles_with_membership_summary(db="sqlite")
 
     async def test_activity_roles_filtering_postgres(self):
-        await self._test_activity_roles_filtering(db="postgresql")
+        await self._test_activity_roles_with_membership_summary(db="postgresql")
 
-    async def _test_activity_roles_filtering(self, db: Literal["sqlite", "postgresql"]):
-        """Test that activity roles are filtered to only include current room members."""
+    async def _test_activity_roles_with_membership_summary(
+        self, db: Literal["sqlite", "postgresql"]
+    ):
+        """Test that activity roles include all users with membership summary."""
         postgres = None
         postgres_url = None
         synapse_dir = None
@@ -1160,7 +1162,7 @@ class TestE2E(aiounittest.AsyncTestCase):
                 admin_token, user1_token, user2_token
             )
 
-            # Initially both users should be in the activity roles
+            # Initially all users should be in the activity roles with join membership
             room_preview_url = (
                 "http://localhost:8008/_synapse/client/unstable/org.pangea/room_preview"
             )
@@ -1175,7 +1177,7 @@ class TestE2E(aiounittest.AsyncTestCase):
             self.assertEqual(response.status_code, 200)
             data = response.json()
 
-            # Verify both users are in activity roles initially
+            # Verify all users are in activity roles
             self.assertIn("rooms", data)
             self.assertIn(room_id, data["rooms"])
             room_data = data["rooms"][room_id]
@@ -1186,7 +1188,7 @@ class TestE2E(aiounittest.AsyncTestCase):
             ]
             self.assertEqual(len(activity_roles), 3)  # admin + user1 + user2
 
-            # Verify all users are present
+            # Verify all users are present in roles
             user_ids_in_roles = {role["user_id"] for role in activity_roles.values()}
             expected_users = {
                 "@admin_user:my.domain.name",
@@ -1195,11 +1197,20 @@ class TestE2E(aiounittest.AsyncTestCase):
             }
             self.assertEqual(user_ids_in_roles, expected_users)
 
+            # Verify membership_summary is present and all users are "join"
+            self.assertIn("membership_summary", room_data)
+            membership_summary = room_data["membership_summary"]
+            self.assertEqual(
+                membership_summary.get("@admin_user:my.domain.name"), "join"
+            )
+            self.assertEqual(membership_summary.get("@user1:my.domain.name"), "join")
+            self.assertEqual(membership_summary.get("@user2:my.domain.name"), "join")
+
             # Remove user2 from the room (kick them)
             kick_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/kick"
             kick_data = {
                 "user_id": "@user2:my.domain.name",
-                "reason": "Test kick for filtering",
+                "reason": "Test kick for membership summary",
             }
             kick_response = requests.post(
                 kick_url,
@@ -1211,7 +1222,8 @@ class TestE2E(aiounittest.AsyncTestCase):
             # Wait a moment for the kick to be processed
             await asyncio.sleep(0.5)
 
-            # Request room preview again - user2's role should be filtered out
+            # Request room preview again - user2's role should still be present
+            # but membership_summary should show user2 as "leave"
             response = requests.get(
                 room_preview_url,
                 params={"rooms": room_id},
@@ -1221,21 +1233,32 @@ class TestE2E(aiounittest.AsyncTestCase):
             self.assertEqual(response.status_code, 200)
             data = response.json()
 
-            # Verify user2's role is filtered out
+            # Verify all users are still in activity roles (no filtering)
             room_data = data["rooms"][room_id]
             activity_roles = room_data["pangea.activity_roles"]["default"]["content"][
                 "roles"
             ]
 
-            # Should only have admin and user1 now (user2 should be filtered out)
-            self.assertEqual(len(activity_roles), 2)
+            # All three users should still be present in roles
+            self.assertEqual(len(activity_roles), 3)
 
             user_ids_in_roles = {role["user_id"] for role in activity_roles.values()}
-            expected_users = {"@admin_user:my.domain.name", "@user1:my.domain.name"}
+            expected_users = {
+                "@admin_user:my.domain.name",
+                "@user1:my.domain.name",
+                "@user2:my.domain.name",
+            }
             self.assertEqual(user_ids_in_roles, expected_users)
 
-            # Verify user2 is NOT in the roles
-            self.assertNotIn("@user2:my.domain.name", user_ids_in_roles)
+            # Verify membership_summary shows correct membership states
+            self.assertIn("membership_summary", room_data)
+            membership_summary = room_data["membership_summary"]
+            self.assertEqual(
+                membership_summary.get("@admin_user:my.domain.name"), "join"
+            )
+            self.assertEqual(membership_summary.get("@user1:my.domain.name"), "join")
+            # user2 should now be "leave" in membership_summary
+            self.assertEqual(membership_summary.get("@user2:my.domain.name"), "leave")
 
         finally:
             if postgres is not None:
@@ -1388,6 +1411,244 @@ class TestE2E(aiounittest.AsyncTestCase):
                 # If present, should be empty or properly structured
                 activity_roles_data = room_data["pangea.activity_roles"]
                 self.assertIsInstance(activity_roles_data, dict)
+
+            # membership_summary should not be present if no activity roles
+            if "pangea.activity_roles" not in room_data:
+                self.assertNotIn("membership_summary", room_data)
+
+        finally:
+            if postgres is not None:
+                postgres.stop()
+            if server_process is not None:
+                server_process.terminate()
+                server_process.wait()
+            if stdout_thread is not None:
+                stdout_thread.join()
+            if stderr_thread is not None:
+                stderr_thread.join()
+            if synapse_dir is not None:
+                shutil.rmtree(synapse_dir)
+
+    async def test_left_users_in_activity_roles_sqlite(self):
+        """Test that left users are preserved in activity roles with membership summary (SQLite)."""
+        await self._test_left_users_in_activity_roles(db="sqlite")
+
+    async def test_left_users_in_activity_roles_postgres(self):
+        """Test that left users are preserved in activity roles with membership summary (PostgreSQL)."""
+        await self._test_left_users_in_activity_roles(db="postgresql")
+
+    async def _test_left_users_in_activity_roles(
+        self, db: Literal["sqlite", "postgresql"]
+    ):
+        """Test that left users are preserved in activity roles for completed activities.
+
+        This test verifies the behavior requested in the issue:
+        - Activity roles should NOT be filtered for users who have left
+        - A membership summary should be returned so clients can display info about
+          completed activities while knowing who has left
+        """
+        postgres = None
+        postgres_url = None
+        synapse_dir = None
+        server_process = None
+        stdout_thread = None
+        stderr_thread = None
+        try:
+            if db == "postgresql":
+                postgres, postgres_url = await self.start_test_postgres()
+            (
+                synapse_dir,
+                config_path,
+                server_process,
+                stdout_thread,
+                stderr_thread,
+            ) = await self.start_test_synapse(db=db, postgresql_url=postgres_url)
+
+            # Register users
+            await self.register_user(
+                config_path=config_path,
+                dir=synapse_dir,
+                user="facilitator",
+                password="fac_pw",
+                admin=True,
+            )
+
+            await self.register_user(
+                config_path=config_path,
+                dir=synapse_dir,
+                user="participant1",
+                password="p1_pw",
+                admin=False,
+            )
+
+            await self.register_user(
+                config_path=config_path,
+                dir=synapse_dir,
+                user="participant2",
+                password="p2_pw",
+                admin=False,
+            )
+
+            await self.register_user(
+                config_path=config_path,
+                dir=synapse_dir,
+                user="participant3",
+                password="p3_pw",
+                admin=False,
+            )
+
+            # Login users
+            facilitator_token = await self.login_user("facilitator", "fac_pw")
+            p1_token = await self.login_user("participant1", "p1_pw")
+            p2_token = await self.login_user("participant2", "p2_pw")
+            p3_token = await self.login_user("participant3", "p3_pw")
+
+            # Create room and add users
+            headers = {"Authorization": f"Bearer {facilitator_token}"}
+            create_room_url = "http://localhost:8008/_matrix/client/v3/createRoom"
+
+            create_room_data = {
+                "visibility": "private",
+                "preset": "private_chat",
+                "name": "Completed Activity Room",
+                "invite": [
+                    "@participant1:my.domain.name",
+                    "@participant2:my.domain.name",
+                    "@participant3:my.domain.name",
+                ],
+            }
+
+            response = requests.post(
+                create_room_url,
+                json=create_room_data,
+                headers=headers,
+            )
+            self.assertEqual(response.status_code, 200)
+            room_id = response.json()["room_id"]
+
+            # All participants join
+            join_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/join"
+
+            for token in [p1_token, p2_token, p3_token]:
+                join_response = requests.post(
+                    join_url, headers={"Authorization": f"Bearer {token}"}
+                )
+                self.assertEqual(join_response.status_code, 200)
+
+            # Add activity roles - simulating a completed activity
+            state_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/state"
+            activity_roles_data = {
+                "roles": {
+                    "role-fac": {
+                        "archived_at": "2024-01-01T10:00:00Z",
+                        "finished_at": "2024-01-01T09:30:00Z",
+                        "id": "role-fac",
+                        "role": "facilitator",
+                        "user_id": "@facilitator:my.domain.name",
+                    },
+                    "role-p1": {
+                        "archived_at": "2024-01-01T10:00:00Z",
+                        "finished_at": "2024-01-01T09:30:00Z",
+                        "id": "role-p1",
+                        "role": "presenter",
+                        "user_id": "@participant1:my.domain.name",
+                    },
+                    "role-p2": {
+                        "archived_at": "2024-01-01T10:00:00Z",
+                        "finished_at": "2024-01-01T09:30:00Z",
+                        "id": "role-p2",
+                        "role": "participant",
+                        "user_id": "@participant2:my.domain.name",
+                    },
+                    "role-p3": {
+                        "archived_at": "2024-01-01T10:00:00Z",
+                        "finished_at": "2024-01-01T09:30:00Z",
+                        "id": "role-p3",
+                        "role": "participant",
+                        "user_id": "@participant3:my.domain.name",
+                    },
+                }
+            }
+
+            roles_response = requests.put(
+                f"{state_url}/pangea.activity_roles/",
+                json=activity_roles_data,
+                headers=headers,
+            )
+            self.assertEqual(roles_response.status_code, 200)
+
+            # participant2 and participant3 leave the room after the activity
+            leave_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/leave"
+
+            p2_leave = requests.post(
+                leave_url, headers={"Authorization": f"Bearer {p2_token}"}
+            )
+            self.assertEqual(p2_leave.status_code, 200)
+
+            p3_leave = requests.post(
+                leave_url, headers={"Authorization": f"Bearer {p3_token}"}
+            )
+            self.assertEqual(p3_leave.status_code, 200)
+
+            # Wait for the leave events to be processed
+            await asyncio.sleep(0.5)
+
+            # Request room preview - should return full roles with membership summary
+            room_preview_url = (
+                "http://localhost:8008/_synapse/client/unstable/org.pangea/room_preview"
+            )
+
+            response = requests.get(
+                room_preview_url,
+                params={"rooms": room_id},
+                headers=headers,
+                timeout=10,
+            )
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+
+            room_data = data["rooms"][room_id]
+
+            # Verify ALL roles are returned (not filtered)
+            self.assertIn("pangea.activity_roles", room_data)
+            activity_roles = room_data["pangea.activity_roles"]["default"]["content"][
+                "roles"
+            ]
+
+            # All 4 users should be in roles (even though 2 have left)
+            self.assertEqual(len(activity_roles), 4)
+
+            user_ids_in_roles = {role["user_id"] for role in activity_roles.values()}
+            expected_users = {
+                "@facilitator:my.domain.name",
+                "@participant1:my.domain.name",
+                "@participant2:my.domain.name",
+                "@participant3:my.domain.name",
+            }
+            self.assertEqual(user_ids_in_roles, expected_users)
+
+            # Verify membership_summary is present and correct
+            self.assertIn("membership_summary", room_data)
+            membership_summary = room_data["membership_summary"]
+
+            # Facilitator and participant1 should be "join"
+            self.assertEqual(
+                membership_summary.get("@facilitator:my.domain.name"), "join"
+            )
+            self.assertEqual(
+                membership_summary.get("@participant1:my.domain.name"), "join"
+            )
+
+            # participant2 and participant3 should be "leave"
+            self.assertEqual(
+                membership_summary.get("@participant2:my.domain.name"), "leave"
+            )
+            self.assertEqual(
+                membership_summary.get("@participant3:my.domain.name"), "leave"
+            )
+
+            # Only users in activity roles should be in membership_summary
+            self.assertEqual(len(membership_summary), 4)
 
         finally:
             if postgres is not None:
