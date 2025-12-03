@@ -29,11 +29,24 @@ The module exposes a REST endpoint at `/_synapse/client/unstable/org.pangea/room
         "state_key": {
           // Full event JSON content
         }
+      },
+      "membership_summary": {
+        "@user_id:example.com": "join"
       }
     }
   }
 }
 ```
+
+#### Membership Summary
+
+When a room contains `pangea.activity_roles` state events, the response includes a `membership_summary` field that maps user IDs (referenced in activity roles) to their current membership status (e.g., `"join"`, `"leave"`, `"invite"`, `"ban"`, `"knock"`).
+
+This allows clients to:
+- Display information about completed activities, including roles of users who have left
+- Filter out users who have left when displaying open/active rooms
+
+**Backwards Compatibility:** The `membership_summary` field is additive and only appears when activity roles are present. Existing clients that don't use this field will continue to work without modification, as the core response structure remains unchanged.
 
 ### Response Structure
 
@@ -75,6 +88,20 @@ curl -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
           "summary": "A place for general discussions",
           "participant_count": 42
         }
+      },
+      "pangea.activity_roles": {
+        "default": {
+          "content": {
+            "roles": {
+              "role-1": {"user_id": "@alice:example.com", "role": "facilitator"},
+              "role-2": {"user_id": "@bob:example.com", "role": "participant"}
+            }
+          }
+        }
+      },
+      "membership_summary": {
+        "@alice:example.com": "join",
+        "@bob:example.com": "leave"
       }
     },
     "!room2:example.com": {}
