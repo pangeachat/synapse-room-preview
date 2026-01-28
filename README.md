@@ -48,6 +48,29 @@ This allows clients to:
 
 **Backwards Compatibility:** The `membership_summary` field is additive and only appears when activity roles are present. Existing clients that don't use this field will continue to work without modification, as the core response structure remains unchanged.
 
+#### Content Filtering for m.room.join_rules
+
+When returning `m.room.join_rules` state events, the module filters the content to only include the `join_rule` key. All other keys (such as `allow` for restricted rooms) are stripped from the response for security and privacy reasons.
+
+Example response for a room with join_rules:
+```json
+{
+  "rooms": {
+    "!room_id:example.com": {
+      "m.room.join_rules": {
+        "default": {
+          "content": {
+            "join_rule": "knock"
+          },
+          "type": "m.room.join_rules",
+          "state_key": ""
+        }
+      }
+    }
+  }
+}
+```
+
 ### Response Structure
 
 - **Success (200):** Returns room preview data in the format above

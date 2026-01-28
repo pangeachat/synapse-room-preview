@@ -1662,3 +1662,352 @@ class TestE2E(aiounittest.AsyncTestCase):
                 stderr_thread.join()
             if synapse_dir is not None:
                 shutil.rmtree(synapse_dir)
+
+    async def test_join_rules_filtering_sqlite(self):
+        await self._test_join_rules_content_filtering(db="sqlite")
+
+    async def test_join_rules_filtering_postgres(self):
+        await self._test_join_rules_content_filtering(db="postgresql")
+
+    async def _test_join_rules_content_filtering(
+        self, db: Literal["sqlite", "postgresql"]
+    ):
+        """Test that m.room.join_rules content only exposes the join_rule key."""
+        postgres = None
+        postgres_url = None
+        synapse_dir = None
+        server_process = None
+        stdout_thread = None
+        stderr_thread = None
+        try:
+            if db == "postgresql":
+                postgres, postgres_url = await self.start_test_postgres()
+
+            # Start Synapse with m.room.join_rules in allowed state event types
+            (
+                synapse_dir,
+                config_path,
+                server_process,
+                stdout_thread,
+                stderr_thread,
+            ) = await self._start_synapse_with_join_rules(
+                db=db, postgresql_url=postgres_url
+            )
+
+            # Register admin user
+            await self.register_user(
+                config_path=config_path,
+                dir=synapse_dir,
+                user="admin_user",
+                password="admin_pw",
+                admin=True,
+            )
+
+            admin_token = await self.login_user("admin_user", "admin_pw")
+
+            # Create a room with join_rules that has additional content
+            room_id = await self._create_room_with_complex_join_rules(admin_token)
+
+            # Request room preview
+            room_preview_url = (
+                "http://localhost:8008/_synapse/client/unstable/org.pangea/room_preview"
+            )
+            headers = {"Authorization": f"Bearer {admin_token}"}
+
+            response = requests.get(
+                room_preview_url,
+                params={"rooms": room_id},
+                headers=headers,
+                timeout=10,
+            )
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+
+            # Verify the response structure
+            self.assertIn("rooms", data)
+            self.assertIn(room_id, data["rooms"])
+            room_data = data["rooms"][room_id]
+
+            # Verify m.room.join_rules is present
+            self.assertIn("m.room.join_rules", room_data)
+            join_rules_data = room_data["m.room.join_rules"]
+            self.assertIn("default", join_rules_data)
+
+            # Get the join_rules event content
+            join_rules_event = join_rules_data["default"]
+            self.assertIn("content", join_rules_event)
+            join_rules_content = join_rules_event["content"]
+
+            # Verify ONLY join_rule key is present in content
+            self.assertIn("join_rule", join_rules_content)
+            self.assertEqual(join_rules_content["join_rule"], "knock")
+
+            # Verify other keys are NOT present (they should be filtered out)
+            # The room was created with additional content that should be stripped
+            self.assertEqual(
+                len(join_rules_content),
+                1,
+                f"join_rules content should only have 1 key (join_rule), but has: {list(join_rules_content.keys())}",
+            )
+            self.assertNotIn(
+                "allow",
+                join_rules_content,
+                "allow key should be filtered out from join_rules content",
+            )
+
+        finally:
+            if postgres is not None:
+                postgres.stop()
+            if server_process is not None:
+                server_process.terminate()
+                server_process.wait()
+            if stdout_thread is not None:
+                stdout_thread.join()
+            if stderr_thread is not None:
+                stderr_thread.join()
+            if synapse_dir is not None:
+                shutil.rmtree(synapse_dir)
+
+    async def _start_synapse_with_join_rules(
+        self,
+        db: Literal["sqlite", "postgresql"] = "sqlite",
+        postgresql_url: Union[str, None] = None,
+    ) -> Tuple[str, str, subprocess.Popen, threading.Thread, threading.Thread]:
+        """Start Synapse with m.room.join_rules in the allowed state event types."""
+        synapse_dir = tempfile.mkdtemp()
+        config_path = os.path.join(synapse_dir, "homeserver.yaml")
+
+        generate_config_cmd = [
+            sys.executable,
+            "-m",
+            "synapse.app.homeserver",
+            "--server-name=my.domain.name",
+            f"--config-path={config_path}",
+            "--report-stats=no",
+            "--generate-config",
+        ]
+        subprocess.check_call(generate_config_cmd)
+
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+
+        log_config_path = config.get("log_config")
+
+        # Configure module with m.room.join_rules included
+        config["modules"] = [
+            {
+                "module": "synapse_room_preview.SynapseRoomPreview",
+                "config": {
+                    "room_preview_state_event_types": [
+                        "pangea.activity_plan",
+                        "pangea.activity_roles",
+                        "m.room.join_rules",
+                    ]
+                },
+            }
+        ]
+
+        if db == "sqlite":
+            config["database"] = {
+                "name": "sqlite3",
+                "args": {"database": "homeserver.db"},
+            }
+        elif db == "postgresql":
+            if postgresql_url is None:
+                self.fail("PostgreSQL URL is required for PostgreSQL database")
+            dsn_params = parse_dsn(postgresql_url)
+            config["database"] = {
+                "name": "psycopg2",
+                "args": dsn_params,
+            }
+
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.dump(config, f)
+
+        with open(log_config_path, "r", encoding="utf-8") as f:
+            log_config = yaml.safe_load(f)
+
+        log_config["root"]["handlers"] = ["console"]
+        log_config["root"]["level"] = "DEBUG"
+
+        with open(log_config_path, "w", encoding="utf-8") as f:
+            yaml.dump(log_config, f)
+
+        run_server_cmd = [
+            sys.executable,
+            "-m",
+            "synapse.app.homeserver",
+            "--config-path",
+            config_path,
+        ]
+
+        server_process = subprocess.Popen(
+            run_server_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=synapse_dir,
+            text=True,
+        )
+
+        def stream_output(pipe: IO[str], log_fn):
+            for line in pipe:
+                log_fn(line.strip())
+
+        stdout_thread = threading.Thread(
+            target=stream_output, args=(server_process.stdout, logger.info)
+        )
+        stderr_thread = threading.Thread(
+            target=stream_output, args=(server_process.stderr, logger.error)
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
+        # Wait for server to start
+        for _ in range(30):
+            try:
+                resp = requests.get("http://localhost:8008/_matrix/client/versions")
+                if resp.status_code == 200:
+                    break
+            except requests.exceptions.ConnectionError:
+                pass
+            await asyncio.sleep(1)
+        else:
+            self.fail("Synapse server did not start in time")
+
+        return synapse_dir, config_path, server_process, stdout_thread, stderr_thread
+
+    async def _create_room_with_complex_join_rules(self, access_token: str) -> str:
+        """Create a room with join_rules that contain additional content beyond join_rule."""
+        headers = {"Authorization": f"Bearer {access_token}"}
+        create_room_url = "http://localhost:8008/_matrix/client/v3/createRoom"
+
+        # Create room with knock join rule
+        create_room_data = {
+            "visibility": "private",
+            "preset": "private_chat",
+            "name": "Test Room for Join Rules Filtering",
+            "initial_state": [
+                {
+                    "type": "m.room.join_rules",
+                    "state_key": "",
+                    "content": {
+                        "join_rule": "knock",
+                        # Additional fields that should be filtered out
+                        "allow": [
+                            {
+                                "type": "m.room_membership",
+                                "room_id": "!some_space:example.com",
+                            }
+                        ],
+                    },
+                },
+            ],
+        }
+
+        response = requests.post(
+            create_room_url,
+            json=create_room_data,
+            headers=headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        return response.json()["room_id"]
+
+    async def test_join_rules_only_join_rule_key_sqlite(self):
+        """Test that when join_rules has only join_rule, it still works correctly."""
+        await self._test_join_rules_simple_content(db="sqlite")
+
+    async def test_join_rules_only_join_rule_key_postgres(self):
+        """Test that when join_rules has only join_rule, it still works correctly."""
+        await self._test_join_rules_simple_content(db="postgresql")
+
+    async def _test_join_rules_simple_content(
+        self, db: Literal["sqlite", "postgresql"]
+    ):
+        """Test m.room.join_rules filtering when content only has join_rule key."""
+        postgres = None
+        postgres_url = None
+        synapse_dir = None
+        server_process = None
+        stdout_thread = None
+        stderr_thread = None
+        try:
+            if db == "postgresql":
+                postgres, postgres_url = await self.start_test_postgres()
+
+            (
+                synapse_dir,
+                config_path,
+                server_process,
+                stdout_thread,
+                stderr_thread,
+            ) = await self._start_synapse_with_join_rules(
+                db=db, postgresql_url=postgres_url
+            )
+
+            await self.register_user(
+                config_path=config_path,
+                dir=synapse_dir,
+                user="admin_user",
+                password="admin_pw",
+                admin=True,
+            )
+
+            admin_token = await self.login_user("admin_user", "admin_pw")
+
+            # Create a room with simple join_rules (only join_rule key)
+            headers = {"Authorization": f"Bearer {admin_token}"}
+            create_room_url = "http://localhost:8008/_matrix/client/v3/createRoom"
+
+            create_room_data = {
+                "visibility": "private",
+                "preset": "private_chat",
+                "name": "Test Room Simple Join Rules",
+                "initial_state": [
+                    {
+                        "type": "m.room.join_rules",
+                        "state_key": "",
+                        "content": {"join_rule": "invite"},
+                    },
+                ],
+            }
+
+            response = requests.post(
+                create_room_url,
+                json=create_room_data,
+                headers=headers,
+            )
+            self.assertEqual(response.status_code, 200)
+            room_id = response.json()["room_id"]
+
+            # Request room preview
+            room_preview_url = (
+                "http://localhost:8008/_synapse/client/unstable/org.pangea/room_preview"
+            )
+
+            preview_response = requests.get(
+                room_preview_url,
+                params={"rooms": room_id},
+                headers=headers,
+                timeout=10,
+            )
+            self.assertEqual(preview_response.status_code, 200)
+            data = preview_response.json()
+
+            room_data = data["rooms"][room_id]
+            self.assertIn("m.room.join_rules", room_data)
+
+            join_rules_content = room_data["m.room.join_rules"]["default"]["content"]
+            self.assertEqual(join_rules_content, {"join_rule": "invite"})
+
+        finally:
+            if postgres is not None:
+                postgres.stop()
+            if server_process is not None:
+                server_process.terminate()
+                server_process.wait()
+            if stdout_thread is not None:
+                stdout_thread.join()
+            if stderr_thread is not None:
+                stderr_thread.join()
+            if synapse_dir is not None:
+                shutil.rmtree(synapse_dir)
