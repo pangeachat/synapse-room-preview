@@ -7,7 +7,9 @@ from synapse.module_api import ModuleApi
 from synapse.storage.databases.main.room import RoomStore
 
 from synapse_room_preview.constants import (
+    EVENT_TYPE_M_ROOM_JOIN_RULES,
     EVENT_TYPE_M_ROOM_MEMBER,
+    JOIN_RULE_CONTENT_KEY,
     MEMBERSHIP_CONTENT_KEY,
     PANGEA_ACTIVITY_ROLE_STATE_EVENT_TYPE,
 )
@@ -66,6 +68,35 @@ def invalidate_room_cache(room_id: str) -> None:
     :param room_id: The room ID to invalidate from cache
     """
     _room_cache.pop(room_id, None)
+
+
+def _filter_join_rules_content(event_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Filter m.room.join_rules event content to only include the 'join_rule' key.
+
+    This ensures we don't expose sensitive or unnecessary information from the
+    join_rules state event. Only the 'join_rule' key is included in the content.
+
+    :param event_data: The full Matrix event data containing 'content' field
+    :return: A copy of event_data with filtered content
+    """
+    if not isinstance(event_data, dict):
+        return event_data
+
+    content = event_data.get("content", {})
+    if not isinstance(content, dict):
+        return event_data
+
+    # Only keep the join_rule key in content
+    filtered_content = {}
+    if JOIN_RULE_CONTENT_KEY in content:
+        filtered_content[JOIN_RULE_CONTENT_KEY] = content[JOIN_RULE_CONTENT_KEY]
+
+    # Create a copy of the event data with filtered content
+    filtered_event = event_data.copy()
+    filtered_event["content"] = filtered_content
+
+    return filtered_event
 
 
 async def _get_membership_summary(
@@ -301,6 +332,11 @@ async def get_room_preview(
 
         # Convert None or empty string state keys to "default"
         key = state_key if state_key is not None and state_key != "" else "default"
+
+        # Filter m.room.join_rules content to only include join_rule key
+        if event_type == EVENT_TYPE_M_ROOM_JOIN_RULES:
+            event_data = _filter_join_rules_content(event_data)
+
         fetched_room_data[room_id][event_type][key] = event_data
 
     # Cache each room's data individually and add to result
