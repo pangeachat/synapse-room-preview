@@ -12,6 +12,7 @@ from synapse_room_preview.constants import (
     JOIN_RULE_CONTENT_KEY,
     MEMBERSHIP_CONTENT_KEY,
     PANGEA_ACTIVITY_ROLE_STATE_EVENT_TYPE,
+    PANGEA_COURSE_PLAN_STATE_EVENT_TYPE,
 )
 
 if TYPE_CHECKING:
@@ -146,49 +147,63 @@ def _add_membership_summary(
     room_data: Dict[str, Dict[str, Any]], membership_summary: Dict[str, str]
 ) -> None:
     """
-    Add membership summary for users in activity roles state event to room data.
+    Add membership summary to room data for activity rooms or course rooms.
 
-    The membership summary only includes users who are referenced in the activity
-    roles state event. This allows clients to determine who has left the room
-    while still seeing all roles (including those of users who have left).
+    For activity rooms (rooms with pangea.activity_roles):
+    - The membership summary only includes users who are referenced in the activity
+      roles state event. This allows clients to determine who has left the room
+      while still seeing all roles (including those of users who have left).
+
+    For course rooms (rooms with pangea.course_plan but no activity_roles):
+    - The membership summary includes all users in the room. This allows clients
+      to see the current membership state of the course room.
 
     :param room_data: The room data dictionary to modify in-place
     :param membership_summary: Dictionary mapping user_id to membership status
     """
-    if PANGEA_ACTIVITY_ROLE_STATE_EVENT_TYPE not in room_data:
+    has_activity_roles = PANGEA_ACTIVITY_ROLE_STATE_EVENT_TYPE in room_data
+    has_course_plan = PANGEA_COURSE_PLAN_STATE_EVENT_TYPE in room_data
+
+    # Only add membership_summary for activity rooms or course rooms
+    if not has_activity_roles and not has_course_plan:
         return
 
-    activity_roles = room_data[PANGEA_ACTIVITY_ROLE_STATE_EVENT_TYPE]
+    if has_activity_roles:
+        # For activity rooms, filter to only users in activity roles
+        activity_roles = room_data[PANGEA_ACTIVITY_ROLE_STATE_EVENT_TYPE]
 
-    # Collect all user IDs from the activity roles
-    user_ids_in_roles: set[str] = set()
-    for event_data in activity_roles.values():
-        if not isinstance(event_data, dict):
-            continue
+        # Collect all user IDs from the activity roles
+        user_ids_in_roles: set[str] = set()
+        for event_data in activity_roles.values():
+            if not isinstance(event_data, dict):
+                continue
 
-        content = event_data.get("content", {})
-        if not isinstance(content, dict):
-            continue
+            content = event_data.get("content", {})
+            if not isinstance(content, dict):
+                continue
 
-        roles = content.get("roles", {})
-        if not isinstance(roles, dict):
-            continue
+            roles = content.get("roles", {})
+            if not isinstance(roles, dict):
+                continue
 
-        for role_data in roles.values():
-            if isinstance(role_data, dict):
-                user_id = role_data.get("user_id")
-                if user_id:
-                    user_ids_in_roles.add(user_id)
+            for role_data in roles.values():
+                if isinstance(role_data, dict):
+                    user_id = role_data.get("user_id")
+                    if user_id:
+                        user_ids_in_roles.add(user_id)
 
-    # Create filtered membership summary with only users in activity roles
-    filtered_summary = {
-        user_id: membership
-        for user_id, membership in membership_summary.items()
-        if user_id in user_ids_in_roles
-    }
+        # Create filtered membership summary with only users in activity roles
+        filtered_summary = {
+            user_id: membership
+            for user_id, membership in membership_summary.items()
+            if user_id in user_ids_in_roles
+        }
 
-    # Add the membership summary to room_data at the top level
-    room_data["membership_summary"] = filtered_summary
+        # Add the membership summary to room_data at the top level
+        room_data["membership_summary"] = filtered_summary
+    else:
+        # For course rooms (without activity roles), include all memberships
+        room_data["membership_summary"] = membership_summary
 
 
 async def get_room_preview(

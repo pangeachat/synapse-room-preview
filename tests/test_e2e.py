@@ -2011,3 +2011,325 @@ class TestE2E(aiounittest.AsyncTestCase):
                 stderr_thread.join()
             if synapse_dir is not None:
                 shutil.rmtree(synapse_dir)
+
+    async def test_course_plan_with_membership_summary_sqlite(self):
+        await self._test_course_plan_with_membership_summary(db="sqlite")
+
+    async def test_course_plan_with_membership_summary_postgres(self):
+        await self._test_course_plan_with_membership_summary(db="postgresql")
+
+    async def _test_course_plan_with_membership_summary(
+        self, db: Literal["sqlite", "postgresql"]
+    ):
+        """Test that rooms with pangea.course_plan include membership_summary."""
+        postgres = None
+        postgres_url = None
+        synapse_dir = None
+        server_process = None
+        stdout_thread = None
+        stderr_thread = None
+        try:
+            if db == "postgresql":
+                postgres, postgres_url = await self.start_test_postgres()
+            (
+                synapse_dir,
+                config_path,
+                server_process,
+                stdout_thread,
+                stderr_thread,
+            ) = await self.start_test_synapse_with_course_plan(
+                db=db, postgresql_url=postgres_url
+            )
+
+            # Register admin user
+            await self.register_user(
+                config_path=config_path,
+                dir=synapse_dir,
+                user="admin_user",
+                password="admin_pw",
+                admin=True,
+            )
+
+            # Register two test users
+            await self.register_user(
+                config_path=config_path,
+                dir=synapse_dir,
+                user="user1",
+                password="pw1",
+                admin=False,
+            )
+
+            await self.register_user(
+                config_path=config_path,
+                dir=synapse_dir,
+                user="user2",
+                password="pw2",
+                admin=False,
+            )
+
+            # Login users
+            admin_token = await self.login_user("admin_user", "admin_pw")
+            user1_token = await self.login_user("user1", "pw1")
+            user2_token = await self.login_user("user2", "pw2")
+
+            # Create a room with course_plan (not activity_roles)
+            room_id = await self.create_room_with_course_plan(
+                admin_token, user1_token, user2_token
+            )
+
+            # Request room preview - should include membership_summary for course rooms
+            room_preview_url = (
+                "http://localhost:8008/_synapse/client/unstable/org.pangea/room_preview"
+            )
+            headers = {"Authorization": f"Bearer {admin_token}"}
+
+            response = requests.get(
+                room_preview_url,
+                params={"rooms": room_id},
+                headers=headers,
+                timeout=10,
+            )
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+
+            # Verify room data includes course_plan
+            self.assertIn("rooms", data)
+            self.assertIn(room_id, data["rooms"])
+            room_data = data["rooms"][room_id]
+            self.assertIn("pangea.course_plan", room_data)
+
+            # Verify course_plan content
+            course_plan = room_data["pangea.course_plan"]["default"]["content"]
+            self.assertIn("uuid", course_plan)
+
+            # Verify membership_summary is present for course rooms
+            self.assertIn("membership_summary", room_data)
+            membership_summary = room_data["membership_summary"]
+
+            # All joined users should be in membership_summary
+            self.assertEqual(
+                membership_summary.get("@admin_user:my.domain.name"), "join"
+            )
+            self.assertEqual(membership_summary.get("@user1:my.domain.name"), "join")
+            self.assertEqual(membership_summary.get("@user2:my.domain.name"), "join")
+
+            # Kick user2 from the room
+            kick_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/kick"
+            kick_data = {
+                "user_id": "@user2:my.domain.name",
+                "reason": "Test kick for course plan membership summary",
+            }
+            kick_response = requests.post(
+                kick_url,
+                json=kick_data,
+                headers=headers,
+            )
+            self.assertEqual(kick_response.status_code, 200)
+
+            # Wait a moment for the kick to be processed
+            await asyncio.sleep(0.5)
+
+            # Request room preview again - user2 should be "leave"
+            response = requests.get(
+                room_preview_url,
+                params={"rooms": room_id},
+                headers=headers,
+                timeout=10,
+            )
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+
+            room_data = data["rooms"][room_id]
+
+            # Verify membership_summary shows correct membership states
+            self.assertIn("membership_summary", room_data)
+            membership_summary = room_data["membership_summary"]
+            self.assertEqual(
+                membership_summary.get("@admin_user:my.domain.name"), "join"
+            )
+            self.assertEqual(membership_summary.get("@user1:my.domain.name"), "join")
+            # user2 should now be "leave" in membership_summary
+            self.assertEqual(membership_summary.get("@user2:my.domain.name"), "leave")
+
+        finally:
+            if postgres is not None:
+                postgres.stop()
+            if server_process is not None:
+                server_process.terminate()
+                server_process.wait()
+            if stdout_thread is not None:
+                stdout_thread.join()
+            if stderr_thread is not None:
+                stderr_thread.join()
+            if synapse_dir is not None:
+                shutil.rmtree(synapse_dir)
+
+    async def start_test_synapse_with_course_plan(
+        self,
+        db: Literal["sqlite", "postgresql"] = "sqlite",
+        postgresql_url: Union[str, None] = None,
+    ) -> Tuple[str, str, subprocess.Popen, threading.Thread, threading.Thread]:
+        """Start synapse with course_plan in the allowed state event types."""
+        try:
+            synapse_dir = tempfile.mkdtemp()
+            config_path = os.path.join(synapse_dir, "homeserver.yaml")
+            generate_config_cmd = [
+                sys.executable,
+                "-m",
+                "synapse.app.homeserver",
+                "--server-name=my.domain.name",
+                f"--config-path={config_path}",
+                "--report-stats=no",
+                "--generate-config",
+            ]
+            subprocess.check_call(generate_config_cmd)
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+            log_config_path = config.get("log_config")
+            # Include pangea.course_plan in allowed state event types
+            config["modules"] = [
+                {
+                    "module": "synapse_room_preview.SynapseRoomPreview",
+                    "config": {
+                        "room_preview_state_event_types": [
+                            "pangea.course_plan",
+                        ]
+                    },
+                }
+            ]
+            if db == "sqlite":
+                if postgresql_url is not None:
+                    self.fail(
+                        "PostgreSQL URL must not be defined when using SQLite database"
+                    )
+                config["database"] = {
+                    "name": "sqlite3",
+                    "args": {"database": "homeserver.db"},
+                }
+            elif db == "postgresql":
+                if postgresql_url is None:
+                    self.fail("PostgreSQL URL is required for PostgreSQL database")
+                dsn_params = parse_dsn(postgresql_url)
+                config["database"] = {
+                    "name": "psycopg2",
+                    "args": dsn_params,
+                }
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.dump(config, f)
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+            with open(log_config_path, "r", encoding="utf-8") as f:
+                log_config = yaml.safe_load(f)
+            log_config["root"]["handlers"] = ["console"]
+            log_config["root"]["level"] = "DEBUG"
+            with open(log_config_path, "w", encoding="utf-8") as f:
+                yaml.dump(log_config, f)
+            run_server_cmd = [
+                sys.executable,
+                "-m",
+                "synapse.app.homeserver",
+                "--config-path",
+                config_path,
+            ]
+            server_process = subprocess.Popen(
+                run_server_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=synapse_dir,
+                text=True,
+            )
+
+            def read_output(pipe: Union[IO[str], None]):
+                if pipe is None:
+                    return
+                for line in iter(pipe.readline, ""):
+                    logger.debug(line)
+                pipe.close()
+
+            stdout_thread = threading.Thread(
+                target=read_output, args=(server_process.stdout,)
+            )
+            stderr_thread = threading.Thread(
+                target=read_output, args=(server_process.stderr,)
+            )
+            stdout_thread.start()
+            stderr_thread.start()
+            server_url = "http://localhost:8008"
+            max_wait_time = 10
+            wait_interval = 1
+            total_wait_time = 0
+            server_ready = False
+            while not server_ready and total_wait_time < max_wait_time:
+                try:
+                    response = requests.get(server_url, timeout=10)
+                    if response.status_code == 200:
+                        server_ready = True
+                        break
+                except requests.exceptions.ConnectionError:
+                    pass
+                finally:
+                    await asyncio.sleep(wait_interval)
+                    total_wait_time += wait_interval
+            if not server_ready:
+                self.fail("Synapse server did not start successfully")
+            return (
+                synapse_dir,
+                config_path,
+                server_process,
+                stdout_thread,
+                stderr_thread,
+            )
+        except Exception as e:
+            server_process.terminate()
+            server_process.wait()
+            stdout_thread.join()
+            stderr_thread.join()
+            shutil.rmtree(synapse_dir)
+            raise e
+
+    async def create_room_with_course_plan(
+        self, admin_token: str, user1_token: str, user2_token: str
+    ) -> str:
+        """Create a room with users and add pangea.course_plan state event."""
+        headers = {"Authorization": f"Bearer {admin_token}"}
+        create_room_url = "http://localhost:8008/_matrix/client/v3/createRoom"
+
+        # Create room
+        create_room_data = {
+            "visibility": "private",
+            "preset": "private_chat",
+            "name": "Test Room for Course Plan",
+            "invite": ["@user1:my.domain.name", "@user2:my.domain.name"],
+        }
+
+        response = requests.post(
+            create_room_url,
+            json=create_room_data,
+            headers=headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        room_id = response.json()["room_id"]
+
+        # Accept invitations for both users
+        join_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/join"
+
+        user1_headers = {"Authorization": f"Bearer {user1_token}"}
+        response = requests.post(join_url, headers=user1_headers)
+        self.assertEqual(response.status_code, 200)
+
+        user2_headers = {"Authorization": f"Bearer {user2_token}"}
+        response = requests.post(join_url, headers=user2_headers)
+        self.assertEqual(response.status_code, 200)
+
+        # Add pangea.course_plan state event
+        state_url = f"http://localhost:8008/_matrix/client/v3/rooms/{room_id}/state/pangea.course_plan"
+        course_plan_content = {"uuid": "b6989779-a498-4463-aac8-2ac06b2a0406"}
+
+        response = requests.put(
+            state_url,
+            json=course_plan_content,
+            headers=headers,
+        )
+        self.assertEqual(response.status_code, 200)
+
+        return room_id

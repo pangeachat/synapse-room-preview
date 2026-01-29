@@ -40,13 +40,22 @@ The module exposes a REST endpoint at `/_synapse/client/unstable/org.pangea/room
 
 #### Membership Summary
 
-When a room contains `pangea.activity_roles` state events, the response includes a `membership_summary` field that maps user IDs (referenced in activity roles) to their current membership status (e.g., `"join"`, `"leave"`, `"invite"`, `"ban"`, `"knock"`).
+The response includes a `membership_summary` field for rooms that contain either:
+- `pangea.activity_roles` state events (activity rooms), or
+- `pangea.course_plan` state events (course rooms)
+
+The `membership_summary` maps user IDs to their current membership status (e.g., `"join"`, `"leave"`, `"invite"`, `"ban"`, `"knock"`).
+
+**For activity rooms** (with `pangea.activity_roles`): The membership summary only includes users who are referenced in the activity roles. This allows clients to determine who has left the room while still seeing all roles (including those of users who have left).
+
+**For course rooms** (with `pangea.course_plan` but without `pangea.activity_roles`): The membership summary includes all users in the room, allowing clients to see the current membership state of the course.
 
 This allows clients to:
 - Display information about completed activities, including roles of users who have left
 - Filter out users who have left when displaying open/active rooms
+- Track course membership status
 
-**Backwards Compatibility:** The `membership_summary` field is additive and only appears when activity roles are present. Existing clients that don't use this field will continue to work without modification, as the core response structure remains unchanged.
+**Backwards Compatibility:** The `membership_summary` field is additive and only appears when activity roles or course plan state events are present. Existing clients that don't use this field will continue to work without modification, as the core response structure remains unchanged.
 
 #### Content Filtering for m.room.join_rules
 
